@@ -85,6 +85,23 @@
       "review_status": "reviewed",
       "reviewer": "Operation Firewall maintainers",
       "notes": "Managed configuration and hook shims were generated or rendered through aramid's supported integration interfaces. No aramid enforcement implementation or tests were copied into Operation Firewall."
+    },
+    {
+      "entry_id": "tooling.rust-1.97.1-2026-07-30",
+      "recorded_at": "2026-07-30",
+      "source_title": "Rust stable toolchain 1.97.1",
+      "source_owner": "The Rust Project",
+      "source_locator": "rustup:1.97.1-x86_64-pc-windows-msvc",
+      "accessed_at": "2026-07-30",
+      "source_class": "development_tooling",
+      "terms_status": "Installed through the official Rustup Winget package; project source remains MIT.",
+      "permitted_use": "Compile, format, lint, and test the independently designed Operation Firewall Rust workspace.",
+      "facts_used": ["Rust 2024 edition", "Cargo workspace", "rustfmt and Clippy components"],
+      "artifacts_influenced": ["rust-toolchain.toml", "Cargo.toml", "Cargo.lock", "crates/ofw-contracts", "crates/ofw-policy", "scripts/verify.py"],
+      "copied_material": false,
+      "review_status": "reviewed",
+      "reviewer": "Operation Firewall maintainers",
+      "notes": "Implementation was derived from Operation Firewall's approved contracts and ADRs, not from the prohibited comparison project or aramid internals."
     }
   ]
 }

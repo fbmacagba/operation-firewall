@@ -44,3 +44,22 @@ This project must not copy, translate, or mechanically adapt source code, tests,
 ## Next milestone
 
 Implement Milestone 1's minimal local decision core in Rust: strict envelope parsing, the documented shell/filesystem/Git subset, target resolution, monotonic policy evaluation, redacted audit-event construction, and validation/assessment CLI commands. Security-invariant tests must carry red-first evidence from their introduction.
+
+## Development verification
+
+The Rust toolchain is pinned in `rust-toolchain.toml`. Run the complete local contract, formatting, lint, and unit-test suite with:
+
+```powershell
+python -B scripts/verify.py
+```
+
+## Current implementation boundary
+
+The first Milestone 1 slice is implemented in `ofw-contracts` and `ofw-policy`:
+
+- bounded identifier, namespaced-name, version, operation, environment, reversibility, blast-radius, layer, and restriction primitives;
+- immutable restriction-bundle composition with duplicate bundle/rule rejection;
+- order-independent evaluation with `deny` dominating `ask` and unresolved applicability producing `indeterminate`;
+- exhaustive monotonicity checks and a deliberate last-writer-wins red-first witness.
+
+JSON deserialization, policy-snapshot hashing, platform target resolution, audit construction, CLI commands, and Codex hook integration are not implemented yet. Canonical-path selectors deliberately evaluate as `indeterminate` until the platform resolver supplies boundary-safe canonical path facts.

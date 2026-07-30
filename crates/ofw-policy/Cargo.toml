@@ -1,0 +1,15 @@
+[package]
+name = "ofw-policy"
+description = "Deterministic monotonic restriction policy for Operation Firewall"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+ofw-contracts = { path = "../ofw-contracts" }
+
+[lints]
+workspace = true

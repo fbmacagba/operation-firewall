@@ -1,0 +1,23 @@
+[workspace]
+members = [
+    "crates/ofw-contracts",
+    "crates/ofw-policy",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+license = "MIT"
+repository = "https://github.com/fbmacagba/operation-firewall"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+expect_used = "deny"
+panic = "deny"
+unwrap_used = "deny"

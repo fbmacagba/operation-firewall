@@ -4,5 +4,5 @@ semgrep_block_armed = false
 bake_started = "2026-07-30"
 
 [tests]
-command = ["python", "-B", "scripts/validate-contracts.py"]
-timeout_s = 60
+command = ["python", "-B", "scripts/verify.py"]
+timeout_s = 300

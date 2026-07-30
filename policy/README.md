@@ -21,3 +21,5 @@ python -B scripts/validate-contracts.py
 ```
 
 The validator dependency is development tooling, not part of the enforcement runtime. Before adding it to a managed environment, follow `AGENTS.md` package-validation requirements.
+
+The initial dependency-free Rust implementation lives in `crates/ofw-contracts` and `crates/ofw-policy`. It implements validated domain primitives, bounded selector inputs, immutable restriction union, deterministic canonical ordering, duplicate-identity rejection, and conservative evaluation. It does not yet parse these JSON contracts or compute the policy snapshot digest.
