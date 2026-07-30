@@ -1,0 +1,36 @@
+#!/bin/sh
+# >>> aramid managed >>>
+# aramid managed git hook (GLOBAL TEMPLATE) -- gate: pre-commit
+# installed by `aramid hooks install` into git's init.templateDir, so git
+# copies it into every NEW `git init` / `git clone`. Do not edit by hand.
+
+# Opt-in guard: this lands in EVERY new repo, so no-op unless the repo is
+# actually onboarded. Fails OPEN (exit 0) on every ambiguity -- a template
+# hook that errors would break unrelated repos machine-wide.
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+[ -n "$ROOT" ] || exit 0
+[ -f "$ROOT/aramid.toml" ] || exit 0
+
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+CHAINED="$DIR/pre-commit.aramid-chained"
+if [ -f "$CHAINED" ]; then
+    "$CHAINED" "$@" || exit $?
+fi
+
+INTERP="/c/Python314/python.exe"
+if [ -x "$INTERP" ]; then
+    "$INTERP" -m aramid check --gate pre-commit
+    status=$?
+elif command -v py >/dev/null 2>&1; then
+    py -3 -m aramid check --gate pre-commit
+    status=$?
+else
+    echo "aramid: no usable python interpreter (tried $INTERP and py -3)" >&2
+    status=3
+fi
+
+case "$status" in
+  2|3) exit 0 ;;
+  *) exit "$status" ;;
+esac
+# <<< aramid managed <<<

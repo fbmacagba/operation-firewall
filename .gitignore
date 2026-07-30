@@ -8,3 +8,8 @@
 .env.*
 !.env.example
 
+# Graphite
+graph-out/
+**/.cache/graphite/
+**/.graphite/
+.graphite-daemon/

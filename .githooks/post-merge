@@ -1,0 +1,15 @@
+#!/bin/sh
+# >>> graphite managed >>>
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+CHAINED="$DIR/post-merge.local"
+if [ -f "$CHAINED" ]; then
+    "$CHAINED" "$@" || true
+fi
+INTERP="/c/Python314/python.exe"
+if [ -x "$INTERP" ]; then
+    "$INTERP" -m graphite.hook_entry >/dev/null 2>&1 || true
+elif command -v py >/dev/null 2>&1; then
+    py -3 -m graphite.hook_entry >/dev/null 2>&1 || true
+fi
+# <<< graphite managed <<<
+exit 0
