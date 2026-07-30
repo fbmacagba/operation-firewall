@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:operation-firewall:schema:v1:error",
+  "title": "Operation Firewall Error v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "error_id", "occurred_at", "operation_id", "category", "code", "safe_message", "retryable", "security_disposition", "component", "correlation_id", "metadata"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "error_id": { "$ref": "#/$defs/uuid" },
+    "occurred_at": { "$ref": "#/$defs/dateTime" },
+    "operation_id": { "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
+    "category": { "enum": ["protocol", "validation", "unsupported", "resolution", "policy", "approval", "audit", "timeout", "concurrency", "internal", "integration_health"] },
+    "code": { "type": "string", "minLength": 3, "maxLength": 128, "pattern": "^[A-Z][A-Z0-9_]+$" },
+    "safe_message": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "retryable": { "type": "boolean" },
+    "security_disposition": { "enum": ["indeterminate", "deny", "unhealthy"] },
+    "component": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-z][a-z0-9_-]+$" },
+    "correlation_id": { "$ref": "#/$defs/id" },
+    "metadata": {
+      "type": "object",
+      "maxProperties": 16,
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+      "additionalProperties": { "type": ["string", "integer", "boolean", "null"], "maxLength": 256 }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$" },
+    "uuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "dateTime": { "type": "string", "format": "date-time", "maxLength": 35 }
+  }
+}

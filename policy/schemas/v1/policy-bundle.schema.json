@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:operation-firewall:schema:v1:policy-bundle",
+  "title": "Operation Firewall Restriction Policy Bundle v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "bundle_id", "bundle_version", "layer", "issued_at", "authority", "scope", "rules"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "bundle_id": { "$ref": "#/$defs/id" },
+    "bundle_version": { "$ref": "#/$defs/version" },
+    "layer": { "enum": ["organization", "user", "repository"] },
+    "issued_at": { "$ref": "#/$defs/dateTime" },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issuer_id", "key_id"],
+      "properties": {
+        "issuer_id": { "$ref": "#/$defs/id" },
+        "key_id": { "type": ["string", "null"], "maxLength": 256 }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tenant_ids", "environments", "repository_ids"],
+      "properties": {
+        "tenant_ids": { "$ref": "#/$defs/idSet" },
+        "environments": { "type": "array", "maxItems": 8, "uniqueItems": true, "items": { "enum": ["local", "development", "test", "staging", "production", "shared", "unknown"] } },
+        "repository_ids": { "$ref": "#/$defs/idSet" }
+      }
+    },
+    "rules": {
+      "type": "array",
+      "maxItems": 2048,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["rule_id", "effect", "selectors", "risk_categories", "rationale", "safer_alternatives"],
+        "properties": {
+          "rule_id": { "$ref": "#/$defs/id" },
+          "effect": { "enum": ["ask", "deny"] },
+          "selectors": {
+            "type": "object",
+            "additionalProperties": false,
+            "minProperties": 1,
+            "properties": {
+              "operation_kinds": { "$ref": "#/$defs/nameSet" },
+              "operation_effects": { "type": "array", "minItems": 1, "maxItems": 9, "uniqueItems": true, "items": { "enum": ["read", "create", "update", "delete", "move", "execute", "permission_change", "publish", "unknown_mutation"] } },
+              "target_kinds": { "$ref": "#/$defs/nameSet" },
+              "environments": { "type": "array", "minItems": 1, "maxItems": 7, "uniqueItems": true, "items": { "enum": ["local", "development", "test", "staging", "production", "shared", "unknown"] } },
+              "reversibility": { "type": "array", "minItems": 1, "maxItems": 5, "uniqueItems": true, "items": { "enum": ["reversible", "recoverable", "conditionally_recoverable", "irreversible", "unknown"] } },
+              "blast_radius": { "type": "array", "minItems": 1, "maxItems": 5, "uniqueItems": true, "items": { "enum": ["single", "bounded", "broad", "unbounded", "unknown"] } },
+              "canonical_path_prefixes": { "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 4096 } }
+            }
+          },
+          "risk_categories": { "$ref": "#/$defs/nameSet" },
+          "rationale": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "safer_alternatives": { "type": "array", "maxItems": 8, "items": { "type": "string", "minLength": 1, "maxLength": 512 } }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$" },
+    "version": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[0-9]+(\\.[0-9]+){0,2}([+-][0-9A-Za-z.-]+)?$" },
+    "dateTime": { "type": "string", "format": "date-time", "maxLength": 35 },
+    "namespacedName": { "type": "string", "minLength": 3, "maxLength": 128, "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$" },
+    "idSet": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+    "nameSet": { "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/namespacedName" } }
+  }
+}

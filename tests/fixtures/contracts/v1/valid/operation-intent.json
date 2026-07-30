@@ -1,0 +1,90 @@
+{
+  "schema_version": "1.0",
+  "operation_id": "11111111-1111-4111-8111-111111111111",
+  "proposed_at": "2026-07-30T12:00:00Z",
+  "actor": {
+    "actor_id": "agent.codex",
+    "actor_type": "agent",
+    "host_instance_id": "host.local-1",
+    "process_id": 4242
+  },
+  "session": {
+    "session_id": "session.example",
+    "turn_id": "turn.example"
+  },
+  "source": {
+    "host": "codex",
+    "host_version": "1.0.0",
+    "protocol": "pre_tool_use",
+    "protocol_version": "1.0",
+    "adapter_id": "ofw.codex",
+    "adapter_version": "1.0.0",
+    "tool_name": "Bash",
+    "tool_use_id": "tool.example"
+  },
+  "operation": {
+    "kind": "git.status",
+    "effect": "read"
+  },
+  "raw_request_digest": {
+    "algorithm": "sha256",
+    "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "normalized_operation": {
+    "canonicalization": "RFC8785",
+    "canonical_json": "{\"effect\":\"read\",\"kind\":\"git.status\"}",
+    "digest": {
+      "algorithm": "sha256",
+      "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  },
+  "resolution_status": "complete",
+  "targets": [
+    {
+      "target_id": "target.repo-1",
+      "kind": "git.repository",
+      "resolution": "resolved",
+      "canonical_id": "F:/Projects/operation-firewall",
+      "identity_digest": {
+        "algorithm": "sha256",
+        "value": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "tenant_id": null,
+      "environment": "local",
+      "evidence_ids": ["fact.repo-root"]
+    }
+  ],
+  "working_context": {
+    "platform": "windows",
+    "cwd": "F:/Projects/operation-firewall",
+    "repository_root": "F:/Projects/operation-firewall",
+    "environment": "local",
+    "tenant_id": null
+  },
+  "requested_privileges": [],
+  "reversibility": {
+    "class": "reversible",
+    "recovery_evidence_ids": []
+  },
+  "blast_radius": {
+    "class": "single",
+    "target_count": 1,
+    "cross_tenant": "no",
+    "evidence_ids": ["fact.repo-root"]
+  },
+  "preconditions": [],
+  "evidence": [
+    {
+      "fact_id": "fact.repo-root",
+      "kind": "git.repository_root",
+      "source": "git-discovery",
+      "observed_at": "2026-07-30T12:00:00Z",
+      "value_digest": {
+        "algorithm": "sha256",
+        "value": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "expires_at": null
+    }
+  ],
+  "sensitive_fields": []
+}

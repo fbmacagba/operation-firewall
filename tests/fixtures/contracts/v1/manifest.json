@@ -1,0 +1,9 @@
+{
+  "cases": [
+    { "schema": "operation-intent.schema.json", "fixture": "operation-intent.json", "red_first_mutation": "allow_root_additional_properties" },
+    { "schema": "decision.schema.json", "fixture": "decision.json", "red_first_mutation": "remove_conditional_requirements" },
+    { "schema": "error.schema.json", "fixture": "error.json", "red_first_mutation": "allow_root_additional_properties" },
+    { "schema": "policy-bundle.schema.json", "fixture": "policy-bundle.json", "red_first_mutation": "allow_policy_grants" },
+    { "schema": "audit-event.schema.json", "fixture": "audit-event.json", "red_first_mutation": "allow_root_additional_properties" }
+  ]
+}

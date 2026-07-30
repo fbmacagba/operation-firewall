@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "error_id": "33333333-3333-4333-8333-333333333333",
+  "occurred_at": "2026-07-30T12:00:00Z",
+  "operation_id": null,
+  "category": "validation",
+  "code": "EVENT_SCHEMA_INVALID",
+  "safe_message": "The tool event did not match the supported schema.",
+  "retryable": false,
+  "security_disposition": "indeterminate",
+  "component": "codex-adapter",
+  "correlation_id": "correlation.example",
+  "metadata": { "field_count": 18 }
+}

@@ -2,12 +2,12 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft for architecture review |
-| Version | 0.1 |
+| Status | Approved for implementation |
+| Version | 0.2 |
 | Last updated | 2026-07-30 |
 | Product | Operation Firewall |
 | Initial delivery | Local Codex plugin with a minimal enforcement runtime |
-| Owners | To be assigned |
+| Owners | Operation Firewall maintainers |
 
 ## 1. Executive summary
 
@@ -15,7 +15,7 @@ Operation Firewall is a policy-driven safety layer for AI agents that can mutate
 
 The product is intentionally broader than a destructive-command denylist. It is designed to cover shell execution, direct filesystem operations, Git, databases, cloud infrastructure, Kubernetes, infrastructure-as-code, and tool or API calls through a common typed intent model.
 
-The first release will establish the trusted enforcement core: strict protocol validation, a versioned `OperationIntent` contract, deterministic policy evaluation, target resolution, operation-bound approval, redacted audit events, and conformance tests. It will not claim complete protection and will treat unavailable enforcement, unsupported high-risk events, parser failure, timeout, and protocol drift as explicit security states.
+The first release will establish the trusted enforcement core: strict protocol validation, a versioned `OperationIntent` contract, deterministic policy evaluation, target resolution, operation-bound approval, redacted audit events, and conformance tests. It will not claim complete protection and will treat unavailable enforcement, unsupported high-risk events, parser failure, timeout, and protocol drift as explicit security states. Milestone 0 architecture review is complete; accepted decisions and contracts are linked throughout this document.
 
 ## 2. Problem statement
 
@@ -134,19 +134,22 @@ The first release will not attempt to provide:
 
 ### 8.1 OperationIntent v1
 
+The normative contract is [`policy/schemas/v1/operation-intent.schema.json`](../policy/schemas/v1/operation-intent.schema.json). JSON is UTF-8, validation uses JSON Schema Draft 2020-12, and digest-bearing JSON uses RFC 8785 canonicalization followed by SHA-256. V1 schemas reject unknown fields. Major versions change required semantics; minor versions may add only optional bounded fields whose absence preserves the prior security meaning.
+
 Every supported adapter must produce a versioned intent containing at least:
 
 | Field | Purpose |
 |---|---|
 | `schema_version` | Enables strict compatibility and migration behavior. |
 | `operation_id` | Unique identifier for correlation and replay protection. |
-| `timestamp` | Records when the operation was proposed. |
+| `proposed_at` | Records when the operation was proposed. |
 | `actor` | Identifies the agent, user, host, and process context. |
 | `session` | Binds decisions and approval to an agent session. |
 | `source` | Identifies the host, tool, protocol, and adapter version. |
-| `operation_kind` | Typed effect such as execute, delete, overwrite, move, force-push, or permission change. |
+| `operation` | Namespaced operation kind and typed effect such as execute, delete, move, or permission change. |
 | `raw_request_digest` | Integrity binding without retaining sensitive raw content. |
 | `normalized_operation` | Canonical representation used for policy and approval binding. |
+| `resolution_status` | Declares whether required resolution is complete, partial, or unresolved. |
 | `targets` | Resolved resources including path, repository, ref, tenant, project, or remote resource identifiers. |
 | `working_context` | Working directory, repository root, environment, tenant, and platform. |
 | `requested_privileges` | Effective identity, elevation, credentials, or scopes required. |
@@ -182,6 +185,16 @@ Decision meanings:
 
 `indeterminate` is never internally converted to a clean `allow`. A trusted policy may map it to `ask` or `deny` for a specific integration.
 
+The Codex `PreToolUse` wire currently supports only `allow` and `deny`. Internal `ask` must be fully resolved inside the hook process; successful verified approval emits wire `allow`, while rejection, expiry, timeout, or verification failure emits wire `deny`. The adapter must never emit unsupported `ask` output. See [`docs/research/codex-hook-protocol.md`](research/codex-hook-protocol.md).
+
+### 8.3 Normative v1 contracts
+
+- [`policy/contracts-v1.md`](../policy/contracts-v1.md) defines the cross-field semantic invariants applied after strict structural validation.
+- [`decision.schema.json`](../policy/schemas/v1/decision.schema.json) defines outcomes, determining rules, policy-snapshot binding, rationale, alternatives, re-evaluation, and exact approval requirements.
+- [`error.schema.json`](../policy/schemas/v1/error.schema.json) defines safe error categories, stable codes, retryability, security disposition, component, correlation, and bounded non-sensitive metadata.
+- [`policy-bundle.schema.json`](../policy/schemas/v1/policy-bundle.schema.json) defines restriction-only bundles and bounded selectors. External policy cannot express a grant or lower-layer override.
+- [`audit-event.schema.json`](../policy/schemas/v1/audit-event.schema.json) defines already-redacted lifecycle and health events. Raw requests, credentials, authorization headers, sensitive payload bodies, and canonical operation bodies have no audit field.
+
 ## 9. Functional requirements
 
 ### 9.1 Protocol and adapter requirements
@@ -211,6 +224,8 @@ Decision meanings:
 - **FR-024:** Unknown high-risk operation kinds must not default to `allow`.
 - **FR-025:** Policy syntax must not permit arbitrary executable code or unbounded evaluation.
 - **FR-026:** Policy bundles must be versioned, validated before activation, and identified in every audit decision.
+- **FR-027:** Policy composition must be a restriction union with no lower-layer deletion, replacement, priority, waiver, disable marker, or grant operation. The effective result is the most restrictive applicable result on `allow < ask < deny`.
+- **FR-028:** Policy activation must be atomic. Concurrent readers observe a complete prior or complete new immutable snapshot, and invalid supplied policy produces an explicit unhealthy/`indeterminate` state rather than silent layer omission.
 
 ### 9.4 Approval requirements
 
@@ -220,6 +235,8 @@ Decision meanings:
 - **FR-033:** Generic confirmation, environment variables, displayed terminal codes, or model-generated acknowledgement must not be treated as sufficient authorization.
 - **FR-034:** The approval message must present the destructive effect, exact targets, blast radius, reversibility, and safer alternatives in plain language.
 - **FR-035:** Organization policy may require an out-of-band approver distinct from the requesting agent or operator.
+- **FR-036:** Capability verification must have no marker, heuristic, content-match, environment-variable, terminal-code, or other non-cryptographic fallback.
+- **FR-037:** Single-use capability redemption must be atomic; among concurrent redemption attempts for the same valid capability, exactly one may succeed.
 
 ### 9.5 Execution and verification requirements
 
@@ -266,6 +283,7 @@ Policy may use bands such as low, moderate, high, and critical, but the underlyi
 - The system must support key rotation and rejection of revoked or expired approval keys.
 - Release artifacts must be reproducible where practical, signed, checksummed, and accompanied by an SBOM and provenance.
 - CI actions and build tools must be pinned to immutable versions or commit identities; unverified remote scripts must not execute in CI.
+- Every security-invariant test must demonstrate failure against a deliberately vulnerable, weakened, or stubbed implementation before its passing result is accepted as evidence.
 
 ## 12. Reliability and performance requirements
 
@@ -295,7 +313,8 @@ Performance targets are acceptance goals, not permission to skip required analys
 - Approval verification must be independent from presentation and terminal input.
 - Audit persistence must be isolated from policy evaluation and must accept already-redacted events.
 - UI, policy authoring, analytics, update checks, fleet management, and dashboards must not run inside the trusted hook hot path.
-- The implementation language and dependency set remain open decisions, but stable tooling, memory safety, cross-platform support, startup performance, and supply-chain footprint are mandatory evaluation criteria.
+- The enforcement core uses stable Rust, Rust 2024 edition, and a pinned Cargo toolchain as specified in [`ADR 0001`](decisions/0001-enforcement-core-language-and-workspace.md). External contracts remain language-neutral.
+- Policy composition uses the hard monotonic restriction union specified in [`ADR 0002`](decisions/0002-monotonic-policy-composition.md).
 
 ## 15. Clean-room and provenance requirements
 
@@ -303,8 +322,9 @@ Performance targets are acceptance goals, not permission to skip required analys
 - Contributors must not copy, translate, mechanically transform, or adapt code, patterns, tests, documentation, rule data, or internal structure from `destructive_command_guard`.
 - External examples, specifications, and datasets must have recorded source, license, and permitted use.
 - A provenance record must accompany imported test fixtures and policy data.
-- The project license must be selected before public distribution.
+- The project is distributed under the MIT License; a license change requires explicit maintainer and legal review.
 - Legal review is required before using materials whose terms restrict relevant parties or derivative use.
+- Contributions and imported artifacts must follow [`docs/clean-room-provenance.md`](clean-room-provenance.md) and update `provenance/registry.json` when required.
 
 ## 16. Success metrics
 
@@ -317,6 +337,7 @@ Performance targets are acceptance goals, not permission to skip required analys
 - All parsers and resolvers meet established complexity and memory budgets under fuzz and adversarial inputs.
 - No secrets appear in audit-redaction fixtures or captured integration logs.
 - Plugin, skill, policy schemas, and release artifacts pass their validators.
+- Every release-blocking security test has retained red-first evidence showing it detects the vulnerability it claims to prevent.
 
 ### 16.2 Operational metrics
 
@@ -334,6 +355,8 @@ Operational metrics must use redacted, privacy-preserving dimensions and must be
 
 ### Milestone 0: Foundation and decisions
 
+Status: Completed 2026-07-30.
+
 Deliverables:
 
 - Approved PRD and threat model.
@@ -349,6 +372,8 @@ Exit criteria:
 - Trust boundaries and unsupported states are documented.
 - No production enforcement claim is made.
 
+Evidence: approved PRD/threat model/architecture; ADRs 0001 and 0002; v1 schemas and fixtures under `policy/schemas/v1` and `tests/fixtures/contracts/v1`; executable contract validation; and the clean-room process and registry.
+
 ### Milestone 1: Local decision core
 
 Deliverables:
@@ -362,9 +387,10 @@ Deliverables:
 
 Exit criteria:
 
-- Required functional tests for FR-001 through FR-026 and FR-050 through FR-054 pass for the supported subset.
+- Required functional tests for FR-001 through FR-028 and FR-050 through FR-054 pass for the supported subset.
 - Fuzzing shows bounded behavior under the established budgets.
 - Unsupported or incomplete high-risk operations return `indeterminate`.
+- Monotonicity and other security-invariant tests include retained red-first evidence and property/mutation coverage.
 
 ### Milestone 2: Bound approval and real hook integration
 
@@ -381,6 +407,7 @@ Exit criteria:
 - FR-030 through FR-045 pass end to end.
 - Host/version coverage is documented and machine-verifiable.
 - Known missing host paths are reported as unhealthy rather than silently presented as protected.
+- Concurrent redemption of one single-use approval proves exactly one success, with red-first evidence against a non-atomic implementation.
 
 ### Milestone 3: Broader operation adapters
 
@@ -423,20 +450,25 @@ The MVP must demonstrate at least these behaviors:
 | Supply-chain compromise affects the gate | Minimize dependencies, pin builds, produce SBOM/provenance, sign artifacts, and separate updating from enforcement. |
 | Clean-room boundary is accidentally crossed | Maintain contributor rules, provenance records, independent tests, and legal review before distribution. |
 
-## 20. Open decisions
+## 20. Decision register
 
-The following decisions must be resolved during Milestone 0:
+### Resolved for Milestone 0
 
-1. Enforcement-core implementation language and build system.
-2. Exact Codex hook protocols and execution paths available to the first integration.
-3. `OperationIntent` serialization format and schema-evolution rules.
-4. Policy authoring format and signed-bundle format.
-5. Approval key storage and local human-authorization UX.
-6. Audit persistence format, retention, and rotation.
-7. Cross-platform path-resolution strategy and initial supported operating systems.
-8. Project license and contributor provenance process.
-9. Whether the first execution boundary only advises/blocks or also brokers constrained execution.
-10. Minimum host behavior required before the product may report that enforcement is active.
+1. **Core language and build:** stable Rust, Rust 2024 edition, pinned Cargo toolchain, and the workspace boundaries in ADR 0001.
+2. **Policy composition:** restriction-only bundle union with a hard monotonic floor and most-restrictive join; no notice-only narrowing or directional overlay (ADR 0002).
+3. **Codex protocol:** `PreToolUse` is the first blocking integration. Internal four-state decisions map to wire `allow`/`deny`; `ask` completes inside the hook. Host fail-open behavior remains an explicit residual risk requiring an outer failure guard and independent coverage reconciliation.
+4. **Serialization and evolution:** UTF-8 JSON, JSON Schema Draft 2020-12, strict v1 schemas, `major.minor` contract versions, RFC 8785 canonicalization, and SHA-256 digests.
+5. **Policy authoring:** bounded declarative JSON restriction bundles. No executable expressions, regex, negation, imports, network lookup, priority, override, or grant rules.
+6. **License and provenance:** MIT; clean-room process in `docs/clean-room-provenance.md` and registry in `provenance/registry.json`.
+7. **First execution boundary:** advise/block only. Codex retains execution after wire `allow`; constrained brokering is later scope.
+8. **Active-enforcement claim:** permitted only for an explicit host/version/tool path with recent successful allow and deny probes, registration integrity, supported protocol, healthy dependencies, and coverage reconciliation. Missing or stale evidence reports degraded/unhealthy, not protected.
+
+### Implementation-stage decisions constrained by this PRD
+
+1. **Signed organization-policy envelope:** select a separately versioned signature envelope and key-distribution model before signed bundle distribution in Milestone 3. Local v1 policy payload semantics are already fixed; an envelope may authenticate but may not change them.
+2. **Approval key storage and UX:** select platform keystore adapters and the local/out-of-band approval presentation before Milestone 2. Cryptographic exact binding, no fallback, rotation, revocation, and atomic single-use redemption are fixed requirements.
+3. **Audit persistence:** select local append/rotation, retention, and crash-consistency details in Milestone 1. Pre-persistence redaction, typed health, correlation, and repository inability to weaken retention are fixed.
+4. **Platform resolver support:** declare and test each supported OS/filesystem combination before enabling it. Unsupported platforms are unhealthy/`indeterminate`; cross-platform behavior may not be guessed from path strings.
 
 ## 21. Definition of done for the first production release
 
@@ -446,11 +478,12 @@ The first production release is complete only when:
 - Every supported event produces a typed result.
 - Indeterminate and integration-failure behavior is fail-safe under active trusted policy.
 - Operation-bound approval and replay protection pass adversarial testing.
+- Security tests have retained evidence that the same assertions failed against intentionally vulnerable implementations.
 - Policy precedence and repository monotonicity are proven by tests.
 - Target resolution and revalidation pass cross-platform containment tests for supported platforms.
 - Audit redaction passes canary-secret tests.
 - Performance and resource budgets pass on supported platforms.
 - Release artifacts are signed, checksummed, accompanied by provenance and an SBOM, and independently verifiable.
 - Installation, upgrade, rollback, hook-health, and recovery paths are documented and tested.
+- The policy and approval designs have passed a distinct adversarial design review, and confirmed bypass findings are permanent corpus cases.
 - Security limitations are documented without claims of complete protection.
-

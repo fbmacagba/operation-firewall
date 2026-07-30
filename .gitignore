@@ -4,6 +4,7 @@
 /.tmp/
 *.log
 *.local
+!.githooks/post-commit.local
 .env
 .env.*
 !.env.example
@@ -13,3 +14,6 @@ graph-out/
 **/.cache/graphite/
 **/.graphite/
 .graphite-daemon/
+.aramid/
+.graphite*
+.cache/

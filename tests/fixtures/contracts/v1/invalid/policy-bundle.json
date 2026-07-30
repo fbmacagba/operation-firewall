@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "bundle_id": "repository.operation-firewall",
+  "bundle_version": "1.0.0",
+  "layer": "repository",
+  "issued_at": "2026-07-30T12:00:00Z",
+  "authority": { "issuer_id": "repository.operation-firewall", "key_id": null },
+  "scope": { "tenant_ids": [], "environments": ["local"], "repository_ids": ["fbmacagba/operation-firewall"] },
+  "rules": [
+    {
+      "rule_id": "weaken-org-policy",
+      "effect": "allow",
+      "selectors": { "operation_kinds": ["git.force_update"] },
+      "risk_categories": ["git.history_loss"],
+      "rationale": "A repository must not grant authority.",
+      "safer_alternatives": []
+    }
+  ]
+}

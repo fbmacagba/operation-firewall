@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:operation-firewall:schema:v1:audit-event",
+  "title": "Operation Firewall Redacted Audit Event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "event_id", "occurred_at", "event_type", "operation_id", "decision_id", "correlation_id", "actor_ref", "session_ref", "source", "operation", "target_refs", "environment", "outcome", "policy_snapshot_digest", "determining_rule_refs", "health", "redaction"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "event_id": { "$ref": "#/$defs/uuid" },
+    "occurred_at": { "$ref": "#/$defs/dateTime" },
+    "event_type": { "enum": ["proposed", "evaluated", "approval_requested", "approved", "denied", "execution_started", "executed", "failed", "partially_completed", "verified", "health_changed"] },
+    "operation_id": { "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
+    "decision_id": { "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
+    "correlation_id": { "$ref": "#/$defs/id" },
+    "actor_ref": { "$ref": "#/$defs/digest" },
+    "session_ref": { "$ref": "#/$defs/digest" },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "protocol", "adapter_id", "tool_name"],
+      "properties": {
+        "host": { "$ref": "#/$defs/id" },
+        "protocol": { "$ref": "#/$defs/id" },
+        "adapter_id": { "$ref": "#/$defs/id" },
+        "tool_name": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "effect", "digest"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/namespacedName" },
+        "effect": { "enum": ["read", "create", "update", "delete", "move", "execute", "permission_change", "publish", "unknown_mutation"] },
+        "digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "target_refs": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/digest" } },
+    "environment": { "enum": ["local", "development", "test", "staging", "production", "shared", "unknown"] },
+    "outcome": { "enum": ["allow", "ask", "deny", "indeterminate", "not_applicable"] },
+    "policy_snapshot_digest": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+    "determining_rule_refs": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 512 } },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enforcement", "audit", "coverage"],
+      "properties": {
+        "enforcement": { "enum": ["healthy", "degraded", "unhealthy", "unknown"] },
+        "audit": { "enum": ["healthy", "degraded", "unhealthy", "unknown"] },
+        "coverage": { "enum": ["healthy", "degraded", "unhealthy", "unknown"] }
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile_id", "profile_version", "redacted_field_count", "canary_scan"],
+      "properties": {
+        "profile_id": { "$ref": "#/$defs/id" },
+        "profile_version": { "$ref": "#/$defs/version" },
+        "redacted_field_count": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "canary_scan": { "enum": ["passed", "failed", "not_run"] }
+      }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$" },
+    "uuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "version": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[0-9]+(\\.[0-9]+){0,2}([+-][0-9A-Za-z.-]+)?$" },
+    "namespacedName": { "type": "string", "minLength": 3, "maxLength": 128, "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$" },
+    "dateTime": { "type": "string", "format": "date-time", "maxLength": 35 },
+    "digest": { "type": "object", "additionalProperties": false, "required": ["algorithm", "value"], "properties": { "algorithm": { "const": "sha256" }, "value": { "type": "string", "pattern": "^[0-9a-f]{64}$" } } }
+  }
+}

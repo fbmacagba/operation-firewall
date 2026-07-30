@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0",
+  "decision_id": "22222222-2222-4222-8222-222222222222",
+  "operation_id": "11111111-1111-4111-8111-111111111111",
+  "operation_digest": { "algorithm": "sha256", "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+  "evaluated_at": "2026-07-30T12:00:00Z",
+  "outcome": "allow",
+  "policy_snapshot_digest": { "algorithm": "sha256", "value": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" },
+  "determining_rules": [
+    { "layer": "builtin", "bundle_id": "builtin.safe-reads", "bundle_version": "1.0.0", "rule_id": "git.status", "effect": "allow" }
+  ],
+  "risk_categories": ["data.read_only"],
+  "rationale": ["The supported operation is read-only and all targets are resolved."],
+  "safer_alternatives": [],
+  "reevaluate_after": null,
+  "approval_requirement": null
+}

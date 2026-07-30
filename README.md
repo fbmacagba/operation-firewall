@@ -6,7 +6,7 @@ The project is intentionally broader than a destructive-shell-command denylist. 
 
 ## Status
 
-Architecture and policy scaffold only. No runtime enforcement claims should be made until hooks, adapters, tests, and fail-safe behavior are implemented and independently verified.
+Milestone 0 foundation approved: architecture decisions, v1 contracts, threat model, and clean-room provenance process are in place. No runtime enforcement exists yet, and no protection claim should be made until hooks, adapters, tests, and fail-safe behavior are implemented and independently verified.
 
 ## Design goals
 
@@ -24,6 +24,7 @@ Architecture and policy scaffold only. No runtime enforcement claims should be m
 - `skills/guarded-operations/` — behavioral workflow used by agents.
 - `hooks/` — future deterministic pre-tool integration.
 - `policy/` — future typed policy schemas and policy bundles.
+- `provenance/` — clean-room source and imported-artifact registry.
 - `docs/` — architecture, threat model, and design decisions.
 - `tests/` — conformance, adversarial, fuzz, and integration plans.
 - `scripts/` — development and validation helpers.
@@ -34,7 +35,7 @@ The working product definition, release scope, functional requirements, security
 
 ## External review
 
-Before Milestone 0 implementation begins, read [`docs/reviews/2026-07-30-aramid-findings.md`](docs/reviews/2026-07-30-aramid-findings.md) — peer review findings on the fail-safe posture, approval-capability concurrency, and the monotonic policy-merge design, with a concretely verified gap (finding 3) that a naive layered-dict policy merge does not give monotonicity for free.
+[`docs/reviews/2026-07-30-aramid-findings.md`](docs/reviews/2026-07-30-aramid-findings.md) records peer-review findings on fail-safe posture, approval-capability concurrency, security-test evidence, and monotonic policy composition. [`docs/reviews/2026-07-30-aramid-response.md`](docs/reviews/2026-07-30-aramid-response.md) maps all eight priorities to accepted decisions and milestone gates.
 
 ## Clean-room boundary
 
@@ -42,4 +43,4 @@ This project must not copy, translate, or mechanically adapt source code, tests,
 
 ## Next milestone
 
-Define the versioned `OperationIntent` schema and implement a minimal pre-tool decision engine with `allow`, `ask`, and `deny` outcomes.
+Implement Milestone 1's minimal local decision core in Rust: strict envelope parsing, the documented shell/filesystem/Git subset, target resolution, monotonic policy evaluation, redacted audit-event construction, and validation/assessment CLI commands. Security-invariant tests must carry red-first evidence from their introduction.

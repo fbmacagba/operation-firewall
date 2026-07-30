@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:operation-firewall:schema:v1:operation-intent",
+  "title": "OperationIntent v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "operation_id",
+    "proposed_at",
+    "actor",
+    "session",
+    "source",
+    "operation",
+    "raw_request_digest",
+    "normalized_operation",
+    "resolution_status",
+    "targets",
+    "working_context",
+    "requested_privileges",
+    "reversibility",
+    "blast_radius",
+    "preconditions",
+    "evidence",
+    "sensitive_fields"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "operation_id": { "$ref": "#/$defs/uuid" },
+    "proposed_at": { "type": "string", "format": "date-time", "maxLength": 35 },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["actor_id", "actor_type", "host_instance_id"],
+      "properties": {
+        "actor_id": { "$ref": "#/$defs/boundedId" },
+        "actor_type": { "enum": ["agent", "user", "service", "unknown"] },
+        "host_instance_id": { "$ref": "#/$defs/boundedId" },
+        "process_id": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+      }
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id"],
+      "properties": {
+        "session_id": { "$ref": "#/$defs/boundedId" },
+        "turn_id": { "$ref": "#/$defs/boundedId" }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "host_version", "protocol", "protocol_version", "adapter_id", "adapter_version", "tool_name", "tool_use_id"],
+      "properties": {
+        "host": { "$ref": "#/$defs/boundedId" },
+        "host_version": { "$ref": "#/$defs/version" },
+        "protocol": { "$ref": "#/$defs/boundedId" },
+        "protocol_version": { "$ref": "#/$defs/version" },
+        "adapter_id": { "$ref": "#/$defs/boundedId" },
+        "adapter_version": { "$ref": "#/$defs/version" },
+        "tool_name": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "tool_use_id": { "$ref": "#/$defs/boundedId" }
+      }
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "effect"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/namespacedName" },
+        "effect": { "enum": ["read", "create", "update", "delete", "move", "execute", "permission_change", "publish", "unknown_mutation"] }
+      }
+    },
+    "raw_request_digest": { "$ref": "#/$defs/digest" },
+    "normalized_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonicalization", "canonical_json", "digest"],
+      "properties": {
+        "canonicalization": { "const": "RFC8785" },
+        "canonical_json": { "type": "string", "minLength": 2, "maxLength": 65536 },
+        "digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "resolution_status": { "enum": ["complete", "partial", "unresolved"] },
+    "targets": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["target_id", "kind", "resolution", "canonical_id", "identity_digest", "evidence_ids"],
+        "properties": {
+          "target_id": { "$ref": "#/$defs/boundedId" },
+          "kind": { "$ref": "#/$defs/namespacedName" },
+          "resolution": { "enum": ["resolved", "ambiguous", "missing", "unsupported"] },
+          "canonical_id": { "type": ["string", "null"], "maxLength": 4096 },
+          "identity_digest": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+          "tenant_id": { "type": ["string", "null"], "maxLength": 256 },
+          "environment": { "enum": ["local", "development", "test", "staging", "production", "shared", "unknown"] },
+          "evidence_ids": { "type": "array", "maxItems": 32, "uniqueItems": true, "items": { "$ref": "#/$defs/boundedId" } }
+        }
+      }
+    },
+    "working_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform", "cwd", "environment", "tenant_id"],
+      "properties": {
+        "platform": { "enum": ["windows", "linux", "macos", "unknown"] },
+        "cwd": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "repository_root": { "type": ["string", "null"], "maxLength": 4096 },
+        "environment": { "enum": ["local", "development", "test", "staging", "production", "shared", "unknown"] },
+        "tenant_id": { "type": ["string", "null"], "maxLength": 256 }
+      }
+    },
+    "requested_privileges": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "scope"],
+        "properties": {
+          "kind": { "$ref": "#/$defs/namespacedName" },
+          "scope": { "type": "string", "minLength": 1, "maxLength": 512 }
+        }
+      }
+    },
+    "reversibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["class", "recovery_evidence_ids"],
+      "properties": {
+        "class": { "enum": ["reversible", "recoverable", "conditionally_recoverable", "irreversible", "unknown"] },
+        "recovery_evidence_ids": { "type": "array", "maxItems": 32, "uniqueItems": true, "items": { "$ref": "#/$defs/boundedId" } }
+      }
+    },
+    "blast_radius": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["class", "target_count", "cross_tenant", "evidence_ids"],
+      "properties": {
+        "class": { "enum": ["single", "bounded", "broad", "unbounded", "unknown"] },
+        "target_count": { "type": ["integer", "null"], "minimum": 0, "maximum": 1000000 },
+        "cross_tenant": { "enum": ["no", "yes", "unknown"] },
+        "evidence_ids": { "type": "array", "maxItems": 32, "uniqueItems": true, "items": { "$ref": "#/$defs/boundedId" } }
+      }
+    },
+    "preconditions": { "$ref": "#/$defs/facts" },
+    "evidence": { "$ref": "#/$defs/facts" },
+    "sensitive_fields": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^(/([^~/]|~[01])*)*$", "maxLength": 1024 }
+    }
+  },
+  "$defs": {
+    "boundedId": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$" },
+    "uuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "version": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[0-9]+(\\.[0-9]+){0,2}([+-][0-9A-Za-z.-]+)?$" },
+    "namespacedName": { "type": "string", "minLength": 3, "maxLength": 128, "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$" },
+    "digest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "value"],
+      "properties": {
+        "algorithm": { "const": "sha256" },
+        "value": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "facts": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["fact_id", "kind", "source", "observed_at", "value_digest"],
+        "properties": {
+          "fact_id": { "$ref": "#/$defs/boundedId" },
+          "kind": { "$ref": "#/$defs/namespacedName" },
+          "source": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "observed_at": { "type": "string", "format": "date-time", "maxLength": 35 },
+          "value_digest": { "$ref": "#/$defs/digest" },
+          "expires_at": { "type": ["string", "null"], "format": "date-time", "maxLength": 35 }
+        }
+      }
+    }
+  }
+}
