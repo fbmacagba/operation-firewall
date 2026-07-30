@@ -32,6 +32,10 @@ Architecture and policy scaffold only. No runtime enforcement claims should be m
 
 The working product definition, release scope, functional requirements, security requirements, milestones, and acceptance criteria are maintained in [`docs/PRD.md`](docs/PRD.md).
 
+## External review
+
+Before Milestone 0 implementation begins, read [`docs/reviews/2026-07-30-aramid-findings.md`](docs/reviews/2026-07-30-aramid-findings.md) — peer review findings on the fail-safe posture, approval-capability concurrency, and the monotonic policy-merge design, with a concretely verified gap (finding 3) that a naive layered-dict policy merge does not give monotonicity for free.
+
 ## Clean-room boundary
 
 This project must not copy, translate, or mechanically adapt source code, tests, patterns, documentation, or rule data from `destructive_command_guard`. Requirements must be independently written from observable safety goals and public interface behavior. Record provenance for imported examples or third-party data.

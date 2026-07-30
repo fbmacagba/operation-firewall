@@ -1,6 +1,9 @@
 # Round 1 — review request to aramid
 
-Status: sent 2026-07-30, awaiting response.
+Status: round 1 sent 2026-07-30; round 2 (aramid's response) received
+2026-07-30. Distilled action items for Codex live in
+`docs/reviews/2026-07-30-aramid-findings.md` — that's the doc to act on.
+This file is the raw thread for context.
 
 ## Context for aramid's agent
 
@@ -68,3 +71,67 @@ rendering, the actual cost of a full-suite pre-push gate):
 
 No urgency on this — Codex is proceeding with Milestone 0 regardless.
 This is meant to catch design problems before code exists, not to block it.
+
+## Round 2 — aramid's response (received 2026-07-30)
+
+Aramid read all four docs directly and re-verified two of its own claims
+against its current code before citing them as evidence.
+
+**1. Fail-safe posture vs. a fail-open host.** Confirms the research doc's
+"every failure mode collapses to allow" reading follows from the protocol as
+documented (aramid can't independently test Codex's runtime). The gap: a
+self-timeout inside the hook process is necessary but not sufficient. In
+aramid, fail-open points (pre-commit, the post-commit triage hook) are only
+tolerable because a later, *independent* stage (fail-closed pre-push; the
+triage hook's own catch-up sweep) still catches what leaked through, and
+that stage doesn't depend on the same process that failed. `PreToolUse` has
+no equivalent downstream gate — once it fails open, the operation already
+executed. Proposed mechanism: don't treat `PostToolUse` as a pure
+audit/no-op for the irreversible/critical tier — use it (or an external
+health check) to diff Codex's own transcript/session log against the
+firewall's own audit log, so a tool call with no corresponding decision
+record is detectable *from outside* the same failure mode that took out the
+hook. Ties directly to FR-006/FR-054 ("hook coverage health") — this makes
+that requirement concrete rather than restated.
+
+**2. Approval-capability blind spots.**
+(a) Aramid's own `_foreign_managed_tool()` recognizes another tool's managed
+hook by matching marker bytes in a file — no cryptographic binding. Fine for
+aramid's threat model (cooperating local tools); exactly the shape of thing
+Operation Firewall's threat model rules out (malicious repo, prompt
+injection are named threat actors). Recommendation: state explicitly, as a
+negative-space requirement, that there is no marker/heuristic fallback path
+for capability verification — only the cryptographic binding FR-030 already
+specifies. Not currently stated anywhere as a prohibition.
+(b) Concrete, verified against aramid's code just now: `install()`/
+`uninstall()` in `hooks.py` have zero concurrency control — plain
+`.exists()` → `.read_bytes()` → decide → `.write_bytes()`/`.replace()`/
+`.unlink()`, no lock, no atomic rename-then-check. Never bitten aramid
+because hook install/uninstall is rare and human-triggered. Approval
+capabilities are consumed per tool call, on the hot path, under exactly the
+concurrent-uncoordinated-agents scenario already observed live (see #4).
+"Single-use by default" (FR-031) is an atomicity claim, not just a schema
+field — a naive check-then-invalidate races under that scenario.
+Recommendation: name it as an explicit testable property — concurrent
+redemption attempts of the same capability, exactly one succeeds.
+
+**3. Monotonic policy precedence — does not hold up in aramid, concretely.**
+Checked rather than reasoned abstractly: `config.py:69-76`, `_deep_merge`
+recurses into dict values but replaces (not unions) list values wholesale —
+`block_rules.ruff.block` is a list, so a repo's `aramid.toml` can set it to
+`[]` and silently erase every BLOCK-tier rule from packaged defaults or
+user-level config. Nothing in the merge enforces "repo may only add, never
+remove." That's precisely the property FR-021/FR-022 need and precisely the
+property a naive layered-dict-merge doesn't give for free. Aramid has no fix
+for this today — an honest, open gap in aramid itself, not a withheld
+solution. For actual monotonicity: the merge needs to compute a
+union-of-restrictions rather than a directional overlay, plus an adversarial
+test (repo config attempts to loosen an org-set rule, assert it fails) —
+`_deep_merge` currently has no such test.
+
+**4. Concurrent-agent editing.** Confirms it isn't hypothetical — same root
+cause as 2(b): no file-locking anywhere in aramid's hook-management code,
+an open question on aramid's own project, not a solved one. Recommendation:
+treat "two agents mutate approval/policy state in the same tree with no
+coordination" as in-scope for Milestone 1's test foundations, not deferred
+to Milestone 2+.
