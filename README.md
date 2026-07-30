@@ -1,65 +1,133 @@
 # Operation Firewall
 
-Operation Firewall is a clean-room project for policy-driven safety controls around high-risk AI-agent operations.
+Operation Firewall is a clean-room, policy-driven safety boundary for AI agents that can mutate code, data, infrastructure, and external systems.
 
-The project is intentionally broader than a destructive-shell-command denylist. Its target enforcement surface includes shell execution, filesystem mutation, Git, databases, cloud infrastructure, Kubernetes, infrastructure-as-code, and tool/API calls.
+It evaluates typed operation intent rather than relying only on command-string deny lists. The design covers shell execution, filesystem and Git mutation, databases, cloud infrastructure, Kubernetes, infrastructure-as-code, and structured tool or API calls through a common contract.
 
-## Status
+> [!IMPORTANT]
+> Operation Firewall is under active development. The contracts and first policy-engine slice are implemented, but runtime hooks, target resolvers, approval capabilities, and end-to-end enforcement are not. Do not treat the current repository as an active protection boundary.
 
-Milestone 0 foundation approved: architecture decisions, v1 contracts, threat model, and clean-room provenance process are in place. No runtime enforcement exists yet, and no protection claim should be made until hooks, adapters, tests, and fail-safe behavior are implemented and independently verified.
+## Project status
 
-## Design goals
+| Milestone | Status | Scope |
+| --- | --- | --- |
+| 0 — Foundation | Complete | Approved PRD, threat model, architecture decisions, v1 contracts, and clean-room provenance |
+| 1 — Local decision core | In progress | Typed contracts and monotonic policy evaluation implemented; parsing, adapters, resolution, audit construction, and CLI remain |
+| 2 — Approval and Codex integration | Not started | Bound approvals, replay protection, real `PreToolUse` integration, and enforcement diagnostics |
+| 3 — Broader adapters | Not started | Database, Kubernetes, cloud, IaC, and MCP adapters |
 
-- Classify typed operations, not only command strings.
-- Resolve exact targets and blast radius before execution.
-- Require explicit, operation-bound approval for high-risk actions.
-- Prefer reversible or transactional alternatives.
-- Fail safely on protocol drift and incomplete analysis.
-- Keep the enforcement runtime small and independently auditable.
-- Record structured, redacted audit events without storing secrets.
+The authoritative scope and acceptance criteria are in the [product requirements](docs/PRD.md).
 
-## Project layout
+## Security model
 
-- `.codex-plugin/` — Codex plugin manifest.
-- `skills/guarded-operations/` — behavioral workflow used by agents.
-- `hooks/` — future deterministic pre-tool integration.
-- `policy/` — future typed policy schemas and policy bundles.
-- `provenance/` — clean-room source and imported-artifact registry.
-- `docs/` — architecture, threat model, and design decisions.
-- `tests/` — conformance, adversarial, fuzz, and integration plans.
-- `scripts/` — development and validation helpers.
+Operation Firewall is designed around these invariants:
 
-## Product requirements
+- Unknown, malformed, unsupported, or timed-out high-risk operations never silently become clean allows.
+- Policy decisions are deterministic and explainable; an AI model is never the sole authorization control.
+- External policy is restriction-only. Repository policy may add restrictions but cannot weaken user or organization policy.
+- Approval must be bound to the exact normalized operation, resolved targets, actor, session, environment, expiry, and use count.
+- Audit contracts exclude raw credentials, authorization headers, sensitive payload bodies, and canonical operation bodies.
+- The trusted enforcement path stays small and independent from UI, analytics, updates, and reporting.
+- Security claims remain limited to explicitly tested host, protocol, tool, and platform coverage.
 
-The working product definition, release scope, functional requirements, security requirements, milestones, and acceptance criteria are maintained in [`docs/PRD.md`](docs/PRD.md).
+See the [threat model](docs/threat-model.md), [architecture](docs/architecture.md), and [monotonic policy ADR](docs/decisions/0002-monotonic-policy-composition.md) for the full rationale.
 
-## External review
+## How decisions work
 
-[`docs/reviews/2026-07-30-aramid-findings.md`](docs/reviews/2026-07-30-aramid-findings.md) records peer-review findings on fail-safe posture, approval-capability concurrency, security-test evidence, and monotonic policy composition. [`docs/reviews/2026-07-30-aramid-response.md`](docs/reviews/2026-07-30-aramid-response.md) maps all eight priorities to accepted decisions and milestone gates.
+1. A protocol adapter strictly validates an event and produces a versioned `OperationIntent`.
+2. A platform resolver establishes concrete targets, boundaries, environment, reversibility, and blast radius.
+3. The policy engine unions all validated restriction bundles and selects the most restrictive applicable result.
+4. The core returns `allow`, `ask`, `deny`, or `indeterminate` with determining rules and safe rationale.
+5. Later milestones will bind approvals, revalidate targets, integrate with the host hook, and emit already-redacted audit events.
 
-## Clean-room boundary
+The Codex `PreToolUse` wire exposes only `allow` and `deny`. Internal `ask` must complete inside the hook before a wire decision is emitted; failure, rejection, timeout, or expiry maps to wire `deny`.
 
-This project must not copy, translate, or mechanically adapt source code, tests, patterns, documentation, or rule data from `destructive_command_guard`. Requirements must be independently written from observable safety goals and public interface behavior. Record provenance for imported examples or third-party data.
+## Implemented today
 
-## Next milestone
+The dependency-free Rust workspace currently contains:
 
-Implement Milestone 1's minimal local decision core in Rust: strict envelope parsing, the documented shell/filesystem/Git subset, target resolution, monotonic policy evaluation, redacted audit-event construction, and validation/assessment CLI commands. Security-invariant tests must carry red-first evidence from their introduction.
+- `ofw-contracts` — bounded identifiers, namespaced names, versions, operation effects, environment classes, reversibility, blast radius, policy layers, and restrictions.
+- `ofw-policy` — validated facts and selectors, immutable restriction union, duplicate identity rejection, canonical ordering, and conservative evaluation.
+- Draft 2020-12 JSON schemas for operation intent, decisions, errors, policy bundles, and audit events.
+- Positive and negative contract fixtures with executable red-first vulnerability witnesses.
+- Property-style monotonicity coverage and a deliberate last-writer-wins counterexample proving the security test can fail.
 
-## Development verification
+Canonical-path selectors currently return `indeterminate` until a platform resolver supplies boundary-safe canonical path facts. JSON parsing, snapshot hashing, target resolution, audit construction, CLI commands, approval capabilities, and live hook integration are not yet implemented.
 
-The Rust toolchain is pinned in `rust-toolchain.toml`. Run the complete local contract, formatting, lint, and unit-test suite with:
+## Repository layout
+
+```text
+crates/
+  ofw-contracts/       Validated domain primitives
+  ofw-policy/          Monotonic restriction evaluation
+policy/
+  schemas/v1/          Normative JSON Schema contracts
+tests/fixtures/        Contract fixtures and red-first witnesses
+docs/                  PRD, architecture, threat model, research, and ADRs
+hooks/                 Planned deterministic host integration
+skills/                Agent-facing guarded-operations workflow
+provenance/            Clean-room source and artifact registry
+scripts/               Deterministic development verification
+```
+
+## Development
+
+### Prerequisites
+
+- Rust `1.97.1` with `rustfmt` and `clippy` (pinned by `rust-toolchain.toml`)
+- Python 3.11 or newer
+- Python `jsonschema` for development-time contract validation
+
+No third-party crate is currently part of the enforcement runtime.
+
+### Verify the repository
+
+Run the complete contract, formatting, lint, and test suite from the repository root:
 
 ```powershell
 python -B scripts/verify.py
 ```
 
-## Current implementation boundary
+Run individual checks when developing a focused change:
 
-The first Milestone 1 slice is implemented in `ofw-contracts` and `ofw-policy`:
+```powershell
+python -B scripts/validate-contracts.py
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-targets --locked
+```
 
-- bounded identifier, namespaced-name, version, operation, environment, reversibility, blast-radius, layer, and restriction primitives;
-- immutable restriction-bundle composition with duplicate bundle/rule rejection;
-- order-independent evaluation with `deny` dominating `ask` and unresolved applicability producing `indeterminate`;
-- exhaustive monotonicity checks and a deliberate last-writer-wins red-first witness.
+Every new security-invariant test must first demonstrate that it fails against a deliberately weakened implementation for the claimed reason. See the [test strategy](tests/README.md).
 
-JSON deserialization, policy-snapshot hashing, platform target resolution, audit construction, CLI commands, and Codex hook integration are not implemented yet. Canonical-path selectors deliberately evaluate as `indeterminate` until the platform resolver supplies boundary-safe canonical path facts.
+### Graphite and Aramid
+
+This repository uses Graphite as its shared local code graph and Aramid for deterministic security and quality gates.
+
+```powershell
+graphite check .
+graphite doctor
+aramid doctor
+aramid status
+```
+
+Graphite-first navigation is required for non-trivial cross-file work; follow [GRAPHITE.md](GRAPHITE.md). Aramid runs through the repository Git hooks and executes the full verification command before push; see [ARAMID.md](ARAMID.md). A clean result from either tool is evidence for its documented checks, not proof of complete security coverage.
+
+## Documentation
+
+- [Product requirements](docs/PRD.md)
+- [Architecture](docs/architecture.md)
+- [Threat model](docs/threat-model.md)
+- [OperationIntent and contract semantics](policy/contracts-v1.md)
+- [Policy and schema guide](policy/README.md)
+- [Clean-room provenance process](docs/clean-room-provenance.md)
+- [Codex hook protocol research](docs/research/codex-hook-protocol.md)
+- [External review findings](docs/reviews/2026-07-30-aramid-findings.md)
+- [External review response](docs/reviews/2026-07-30-aramid-response.md)
+
+## Clean-room boundary
+
+Do not copy, translate, mechanically adapt, or derive implementation, patterns, tests, documentation, or rule data from `destructive_command_guard`. Requirements and tests must be independently written from this repository's safety goals and public interface behavior. Imported examples, specifications, datasets, and policy data require provenance and license review under the [clean-room process](docs/clean-room-provenance.md).
+
+## License
+
+Operation Firewall is available under the [MIT License](LICENSE).
