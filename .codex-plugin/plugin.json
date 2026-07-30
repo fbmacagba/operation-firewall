@@ -1,0 +1,22 @@
+{
+  "name": "operation-firewall",
+  "version": "0.1.0",
+  "description": "Policy-driven safety gates for high-risk agent operations.",
+  "author": {
+    "name": "Operation Firewall contributors"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Operation Firewall",
+    "shortDescription": "Review and gate risky agent operations.",
+    "longDescription": "Operation Firewall adds policy-driven preflight, approval, execution, and audit controls for destructive or high-impact agent operations.",
+    "developerName": "Operation Firewall contributors",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive", "Write"],
+    "defaultPrompt": [
+      "Assess this operation for destructive risk.",
+      "Create a safe execution plan for this change.",
+      "Audit this workspace's operation safety controls."
+    ]
+  }
+}

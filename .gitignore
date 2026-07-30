@@ -1,0 +1,10 @@
+/target/
+/dist/
+/coverage/
+/.tmp/
+*.log
+*.local
+.env
+.env.*
+!.env.example
+
