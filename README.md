@@ -28,6 +28,10 @@ Architecture and policy scaffold only. No runtime enforcement claims should be m
 - `tests/` — conformance, adversarial, fuzz, and integration plans.
 - `scripts/` — development and validation helpers.
 
+## Product requirements
+
+The working product definition, release scope, functional requirements, security requirements, milestones, and acceptance criteria are maintained in [`docs/PRD.md`](docs/PRD.md).
+
 ## Clean-room boundary
 
 This project must not copy, translate, or mechanically adapt source code, tests, patterns, documentation, or rule data from `destructive_command_guard`. Requirements must be independently written from observable safety goals and public interface behavior. Record provenance for imported examples or third-party data.
@@ -35,4 +39,3 @@ This project must not copy, translate, or mechanically adapt source code, tests,
 ## Next milestone
 
 Define the versioned `OperationIntent` schema and implement a minimal pre-tool decision engine with `allow`, `ask`, and `deny` outcomes.
-
