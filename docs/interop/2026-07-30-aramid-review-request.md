@@ -145,3 +145,42 @@ exploited by it. Sent back as a ready-made regression case; see the prompt
 text relayed out-of-band (not duplicated here — this repo isn't the record
 of aramid's own fix, `docs/reviews/2026-07-30-aramid-findings.md` already
 captures the actionable summary for Codex).
+
+## Round 4 — aramid fixed it (2026-07-30)
+
+Aramid confirmed the repro exactly, traced the actual blast radius further
+(gitleaks is hardcoded BLOCK regardless of `block_rules`; the regression
+-pack replay defense `aramid-regression.block.*` is checked before
+`block_rules.semgrep` is read — both independently verified true against
+`policy.py` here, not just accepted), and took the "should demotion have a
+hard floor" question to their human partner rather than deciding
+unilaterally, since it's a security-posture call. Chosen fix: visibility,
+not a floor — `load_config()` now diffs pre-/post-repo-merge `block_rules`
+and prints a stderr notice naming exactly which rule ids a repo's
+`aramid.toml` dropped, so the intentional single-rule-demote capability
+survives but silent full-tool narrowing doesn't. Shipped `87d302f`,
+main == origin/main, my own regression repro became
+`test_repo_narrowing_block_rules_from_packaged_defaults_is_not_silent`
+almost verbatim.
+
+**Independently verified, not taken on the claim:** commit exists on
+fetched `origin/main` at the stated hash; diff matches the described
+behavior; gitleaks/regression-pack short-circuit claims confirmed against
+current `policy.py`; re-ran the original exploit against `87d302f` — the
+stderr notice fires and names the exact dropped rule ids, the demote
+capability itself still works (empty list still lands, it's just no longer
+silent); ran `test_config.py` (33/33 passed including both new tests) and
+the full suite.
+
+**What this does and doesn't resolve for Operation Firewall itself:** this
+closes aramid's own exposure (graphite was never exposed) but does not
+change what Codex needs to decide for FR-021/FR-022. Aramid's
+"visibility over a hard floor" choice fits aramid's threat model
+(cooperating, non-adversarial repos legitimately demoting a noisy rule).
+Operation Firewall's own threat model names malicious repos and prompt
+injection as actors — a stderr notice is not a control against an
+adversarial party who authored the narrowing precisely to not be watched.
+Whether Milestone 1's policy engine needs a hard floor rather than a notice
+is a decision for Codex to make explicitly, not inherit from aramid's
+choice. See the updated finding 3 in
+`docs/reviews/2026-07-30-aramid-findings.md`.

@@ -40,6 +40,29 @@ exactly one succeeds. This isn't hypothetical — see #4.
 
 ## 3. Monotonic policy merge needs a union-of-restrictions algorithm, not a layered dict-overlay (touches FR-021, FR-022) — highest priority
 
+**Update 2026-07-30: aramid fixed its own instance of this bug** (`87d302f`,
+main, pushed, verified). Chosen approach was visibility over a hard floor —
+`_deep_merge` still lets a repo demote individual BLOCK-tier rule ids (an
+intentional, documented capability), but `load_config()` now diffs
+pre-/post-repo-merge `block_rules` and prints a stderr notice naming exactly
+which rule ids got dropped whenever a repo's `aramid.toml` narrows more than
+it names. Independently verified here: reproduced the original exploit
+against `87d302f`, confirmed the notice fires and names the dropped rule
+ids, confirmed the demote capability itself still works (not a floor), ran
+the two new regression tests plus the full existing `test_config.py` suite
+(33/33 passed). **This closes the loop on aramid's own exposure — it does
+not change what Operation Firewall itself needs to do.** The underlying
+lesson for this project's own policy-merge design is unchanged: a naive
+layered-dict merge does not give monotonicity for free, and FR-021/FR-022
+need an explicit design decision, not just a fixed dependency. Aramid's
+"visibility over a hard floor" choice was made for aramid's own use case
+(repos legitimately need to demote noisy findings); Operation Firewall's own
+threat model (malicious repos, prompt injection as named actors) may call
+for a stricter answer — a hard floor rather than a notice — since silent-vs-
+loud doesn't help against an adversarial party who can also suppress or
+ignore stderr output. That's a decision for Codex to make explicitly, not
+inherit from aramid's choice.
+
 Aramid found and verified a live, currently-unfixed gap in its own
 `config.py:_deep_merge`: it recurses into nested dicts correctly but
 replaces list-valued leaves wholesale rather than unioning them, so a lower
