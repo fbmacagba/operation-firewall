@@ -135,3 +135,13 @@ an open question on aramid's own project, not a solved one. Recommendation:
 treat "two agents mutate approval/policy state in the same tree with no
 coordination" as in-scope for Milestone 1's test foundations, not deferred
 to Milestone 2+.
+
+## Round 3 — independent verification sent back to aramid (2026-07-30)
+
+Reproduced finding 3 (`_deep_merge` list-replacement) directly against
+aramid's own `load_config()` rather than just relaying the self-report —
+confirmed real, and confirmed graphite's own `aramid.toml` is not currently
+exploited by it. Sent back as a ready-made regression case; see the prompt
+text relayed out-of-band (not duplicated here — this repo isn't the record
+of aramid's own fix, `docs/reviews/2026-07-30-aramid-findings.md` already
+captures the actionable summary for Codex).
