@@ -1,6 +1,6 @@
 # ADR 0003: Agent roles, write scope, and the interop protocol
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-31
 - Deciders: Operation Firewall maintainers
 
@@ -41,17 +41,33 @@ Ratify the roles as actually practised, not as round 6 described them. Round 6 i
 
 **Concurrency.** Any agent must run `git status` immediately before staging, and stage only its own files by explicit path. Never `git add -A`. The working tree routinely carries another agent's in-flight work.
 
+**Every agent identifies itself in its commits with a `Co-Authored-By` trailer.** Exact values, so the rule is checkable rather than approximate:
+
+```
+Co-Authored-By: codex-agent <codex@agents.local>
+Co-Authored-By: aramid-agent <aramid@agents.local>
+Co-Authored-By: graphite-agent <graphite@agents.local>
+```
+
+One trailer per agent that authored the commit; an agent adds only its own. Existing model-attribution trailers are unaffected and both may appear. The committer identity stays `jared0565`, so nothing about push access, signing, or published history changes.
+
+Audit with `git log --grep='Co-Authored-By: graphite-agent'`. A commit touching paths this ADR assigns to one agent while carrying another's trailer is the violation this makes visible.
+
 **No agent grants itself scope.** Changes to this ADR are the maintainer's decision. Two agents agreeing between themselves does not ratify anything.
 
-## Open sub-decision — commit attribution
+## Resolved sub-decision — commit attribution
 
-This ADR cannot move to Accepted until this is resolved, because the rules above are otherwise unenforceable and unauditable.
+Acceptance was gated on this, because the write-scope rules above are otherwise unenforceable and unauditable: every commit in this repository is authored `jared0565 <jared0565@gmail.com>`, so all three agents are indistinguishable in history.
 
-1. **Accept single-identity commits.** Cheapest; no tooling change. Authorship remains inferable only from paths and filenames. Adequate if the agents are trusted and the audit trail is not a security control.
-2. **Per-agent `Co-Authored-By` trailers.** Each agent appends a distinct trailer. Cheap, greppable, preserves a single committer identity. Does not survive a squash.
-3. **Per-agent git identities.** Each agent commits with its own `user.name`/`user.email`. Strongest attribution and `git log --author` works. Requires per-agent git config and makes the agents visible in any published history.
+**Decided by the maintainer, 2026-07-31: per-agent `Co-Authored-By` trailers** (option 2 of the three below).
 
-Recommendation: option 2, escalating to 3 if the audit trail ever becomes a compliance artifact rather than an operational convenience.
+1. **Accept single-identity commits.** Cheapest; no tooling change. Authorship remains inferable only from paths and filenames. Adequate if the agents are trusted and the audit trail is not a security control. *Rejected: it leaves this ADR's central rules unenforceable by construction.*
+2. **Per-agent `Co-Authored-By` trailers.** Each agent appends a distinct trailer. Cheap, greppable, preserves a single committer identity. **Chosen.**
+3. **Per-agent git identities.** Each agent commits with its own `user.name`/`user.email`. Strongest attribution and `git log --author` works. Requires per-agent git config and makes the agents visible in any published history. *Not rejected — deferred.*
+
+**Known limit, recorded rather than glossed:** a trailer does not survive a squash merge, and nothing enforces that an agent adds its own trailer honestly. This is an operational convenience, not a security control. **Escalate to option 3** if the audit trail ever becomes a compliance artifact, or if squash-merging becomes routine here; that is a new ADR, not an edit to this one.
+
+Attribution is not retroactive. Commits before this ADR's acceptance stay single-identity, and the round-filename convention remains the only signal for them.
 
 ## Consequences
 
