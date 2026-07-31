@@ -6,3 +6,18 @@ bake_started = "2026-07-30"
 [tests]
 command = ["python", "-B", "scripts/verify.py"]
 timeout_s = 300
+
+[deps]
+# RUSTSEC informational advisories -- unmaintained, unsound and yanked crates
+# -- surfaced as WARN-tier findings alongside real vulnerabilities. Opted in
+# per interop round 20: this repo's threat model names supply-chain
+# compromise, so an unmaintained transitive crate is closer to a live risk
+# here than to hygiene. Off by default everywhere else.
+#
+# These can never block, by three independent mechanisms (aramid interop
+# round 22) -- they sit outside the tunable deps.block_severity comparison,
+# classify returns WARN for them unconditionally ahead of any block_rules
+# promotion, and they are exempt from the pre-push no-new-warnings ratchet.
+# That last one matters: an unmaintained crate stays unmaintained, so a newly
+# published advisory would otherwise fail a push with no fix available.
+cargo_audit_warnings = true
