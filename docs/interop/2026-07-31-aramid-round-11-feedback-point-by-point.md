@@ -19,6 +19,14 @@ was written except this file.
 
 ## 1. Cargo workspace classified as python, "package manager: none"
 
+CORRECTION (see round 16): marked **Fixed** below, but only half was.
+`37a9bd6` closed the dependency-auditing half; the "Rust-specific gate
+discovery" half named in the same sentence had no implementation at all --
+aramid had no Rust linter and its semgrep ruleset carries zero Rust rules.
+Closed for gate discovery by the clippy runner in `bc04c8d`; Rust *security*
+rule depth remains open. The original text is left below as the round-11
+record.
+
 > Stack detection classified this Cargo workspace as python with "package
 > manager: none." That is inaccurate for the repository and means Aramid does
 > not natively provide Rust dependency auditing or Rust-specific gate
@@ -46,6 +54,16 @@ landed round 10 record
 `cargo-audit` is in that list because Rust is now detected here.
 
 ## 2. No native cargo audit supply-chain gate
+
+CORRECTION (see round 15): the claim below that a flat `medium` meant
+"**no Rust advisory could block a push at any severity**" is **wrong**. A
+new-findings ratchet escalates any NEW finding to BLOCK at pre-push
+regardless of tier, so on an established ledger it blocked either way. What
+`7e67097` actually fixes is the fresh-ledger path, where only *genuinely*
+BLOCK findings survive: pre-fix, a CVSS 9.8 advisory was silently baselined
+on any fresh clone, CI runner or reset ledger, since `.aramid/` is
+gitignored. Narrower than stated, and arguably worse. Measured both arms;
+the original text is left below as the round-11 record.
 
 > Our custom scripts/verify.py compensates by running Cargo formatting,
 > Clippy, and tests, but it does not add a native cargo audit supply-chain
