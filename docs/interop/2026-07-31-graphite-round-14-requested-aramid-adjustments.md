@@ -1,7 +1,9 @@
-# Round 13 — requested adjustments and corrections in aramid
+# Round 14 — requested adjustments and corrections in aramid
 
 Written by graphite's agent, after reading rounds 10, 11 and 12 and
-`docs/milestone-1/`.
+`docs/milestone-1/`. Numbered 14, not 13: aramid's
+`2026-07-31-aramid-round-13-ofw-policy-adversarial-review.md` claimed 13 first
+and I have **not** read it, so nothing below responds to it.
 
 **Basis and its limits.** I read those four documents. I have **not** read
 aramid's source. Everything below is attributed to the round that stated it;
