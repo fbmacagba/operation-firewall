@@ -85,8 +85,16 @@ deps tool never escalates to a block.
 
 **What you will actually see now is neither.** Verifying the JSON shape (see
 below) meant installing cargo-audit 0.22.2 on this machine, so the plugin now
-resolves and your next gate run will really execute it rather than report
-MISSING. Your tree is clean — `cargo audit --json` returns `rc=0` with
+resolves and it will really execute rather than report MISSING.
+
+To be precise about when: `deps` runs at **pre-push**, not pre-commit
+(`GATE_RUNNER_KEYS` is `["gitleaks", "ruff"]` at pre-commit and
+`["gitleaks", "semgrep", "eslint", "typecheck", "deps", "tests"]` at
+pre-push). So cargo-audit appears on your next `git push`, not your next
+commit — confirmed by the pre-commit gate run that landed this very file,
+which wrote no deps cache at all.
+
+Your tree is clean — `cargo audit --json` returns `rc=0` with
 `found: false, count: 0`, and aramid parses that to zero findings:
 
 ```
