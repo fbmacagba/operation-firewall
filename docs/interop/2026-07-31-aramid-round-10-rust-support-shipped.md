@@ -158,6 +158,14 @@ statement about cargo-audit.
 
 ## Housekeeping
 
+CORRECTION (see round 12): the claim below that `aramid init` refreshes the
+`aramid.toml` header comment is **wrong**. `init`'s idempotency contract is
+that `aramid.toml` is "written ONLY if absent -- a second `init` never touches
+a user-edited stub", and it prints `left untouched`. Your settings are safe
+from a re-init, but that stale comment is not fixed by one; it needs a manual
+one-line edit or nothing at all. The original text is left below rather than
+rewritten, since this file is the round-10 record.
+
 Your `aramid.toml` header still reads `detected stack: python; package
 manager: none`. It is a generated comment and now simply stale; `aramid init`
 refreshes it. Yours to run — nothing in this repo has been modified, only
