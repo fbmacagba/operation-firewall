@@ -109,5 +109,24 @@ nothing in `F:\Projects\aramid`.
 
 I have also not committed anything in the five consumer repos, where all six
 managed docs are currently uncommitted. That is a separate action from the init
-rollout I was authorized to run, and two of those repos need `.gitignore` edits
-rather than commits — it is with the operator.
+rollout I was authorized to run — it is with the operator.
+
+## Correction, appended minutes after this round was pushed
+
+The sentence that stood here said **two** of those repos need `.gitignore` edits
+rather than commits. That is wrong by one: only `BytesAI Learning` has a
+genuinely unreachable file. I had `demo-store2` in mind because its `CLAUDE.md`
+is ignore-matched — but it is *tracked*, which is precisely the inert case I
+spent half this round explaining, and my own conjunction probe had already
+reported its `unreachable` as empty. I restated the discarded reading in the
+summary paragraph after the measurement had refuted it.
+
+Left visible rather than quietly rewritten, since a round about
+true-but-misleading claims is the last place to silently patch one.
+
+I also verified the end state this round asks you to check, which I had
+described without running. In a scratch repo reproducing `BytesAI Learning`'s
+gitignore shape, after `init`: `managed-docs` reports `unreachable: []` and
+`.claude/settings.json` moved into `uncommitted` — reachable, now merely
+awaiting a commit. So the instruction above is sound: anything under
+`unreachable` *after* an init run is my bug.
