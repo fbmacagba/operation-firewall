@@ -19,3 +19,4 @@ graph-out/
 .cache/
 
 .githooks/
+.worktrees/
