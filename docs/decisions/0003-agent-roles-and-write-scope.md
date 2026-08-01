@@ -26,7 +26,7 @@ Ratify the roles as actually practised, not as round 6 described them. Round 6 i
 
 **Codex owns implementation.** The PRD, threat model, architecture, this ADR series, and all source under `crates/`, `scripts/`, `policy/`, and `provenance/`. All design and implementation decisions are Codex's, including whether to act on any finding raised by the other two agents. Milestone documentation under `docs/milestone-*/` is Codex's.
 
-**aramid owns security review and its own tooling.** In this repository it writes only: its own round documents in `docs/interop/`, and the files its own `init` generates — `ARAMID.md`, `.githooks/`, and `aramid.toml`. It does not write source, ADRs, or the PRD. **`aramid check` is never run against this repository**; its ledger and cache are the repository's, and populating them from a review session corrupts the record that the real gate depends on. Review is performed against aramid's own fixtures, and findings are reported here.
+**aramid owns security review and its own tooling.** In this repository it writes only: its own round documents in `docs/interop/`, and the files its own `init` generates — `ARAMID.md`, `.githooks/`, and `aramid.toml`. It does not write source, ADRs, or the PRD. **`aramid check` is never run against this repository as a review action** — its ledger and cache are the repository's, and populating them from a review session corrupts the record the real gate depends on. This does not extend to the repository's own hooks, which run on any commit by any agent, including aramid's commits to `docs/interop/`; those runs are the gate working normally and their ledger entries are legitimate. Review is performed against aramid's own fixtures, and findings are reported here.
 
 **graphite owns the code graph and hook management.** `graph-out/`, `GRAPHITE.md`, the graphite-managed agent instruction files, and its git-hook trampolines. It writes its own round documents in `docs/interop/`. It audits claims made by the other agents and reports findings, and it may make judgment calls on matters delegated to it in writing. **It does not design or implement the enforcement engine.** A request that it write engine code is a scope change and must be confirmed with the maintainer before proceeding.
 
@@ -86,6 +86,20 @@ This ADR governs process only. It grants no agent any authority over the enforce
 **Let the agents ratify it between themselves.** Rejected: a standing multi-agent write-access arrangement on a maintainer's repository is the maintainer's decision. Both aramid and graphite independently declined to accept it on their own authority, which was correct.
 
 **Per-agent directories with no shared channel.** Rejected: the value of `docs/interop/` is that disagreement is visible in one ordered thread. Round 15's correction of round 11, and round 19's audit of round 16, are only legible because they sit in sequence.
+
+## Amendments
+
+Recorded rather than applied silently. "Do not edit the decision in place" below governs a *changed arrangement*; a clarification that leaves every agent's behaviour exactly as it was is not one, and superseding a two-hour-old ADR over a wording fix would bury the decision rather than preserve it. Anything that actually changes who may write where gets ADR 0004.
+
+**2026-08-01 — `aramid check` scoped to "as a review action".** Source: aramid, round 29 (`docs/interop/2026-07-31-aramid-round-29-the-rule-i-keep-and-the-hook-that-does-not.md`). Decided by the maintainer.
+
+As accepted, the aramid clause read "**`aramid check` is never run against this repository**" without qualification. aramid kept that literally and never invoked it — and the ledger filled up anyway, because every commit they make to `docs/interop/` fires *this repository's own* pre-commit hook, which runs `python -m aramid check --gate pre-commit`. They measured 33 pre-commit runs of 134 total events, 8 of them from one afternoon of interop commits: roughly a fifth of the ledger produced by the agent the rule exists to keep out of it.
+
+The wording was narrower than its rationale. These are genuine commits to this repository, not review actions; a gate firing on a real commit is the gate working, and the recorded events are honest — gitleaks and ruff really did run over really staged files. The only way to suppress them is `--no-verify`, which would disable gitleaks and the new-findings ratchet on commits touching this repo. That trades a cosmetic ledger property for a real hole, in the one repository where that is least acceptable.
+
+So the rule stands and aramid's compliance stands; only the sentence changed. The distinction that governs is **review action vs. ordinary commit**, not "aramid's process never touches the ledger" — which is unachievable while aramid commits here at all, and would not be desirable if it were.
+
+Amended by graphite on the maintainer's instruction. Line 27 assigns this ADR series to Codex; the maintainer's decision under "No agent grants itself scope" is what authorises the edit, and it is not a standing precedent.
 
 ## Rollback and compatibility
 
