@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/ofw-adapter-codex",
     "crates/ofw-contracts",
     "crates/ofw-policy",
 ]

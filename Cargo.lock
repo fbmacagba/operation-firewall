@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "ofw-adapter-codex"
+version = "0.1.0"
+
+[[package]]
 name = "ofw-contracts"
 version = "0.1.0"
 

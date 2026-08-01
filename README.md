@@ -12,7 +12,7 @@ It evaluates typed operation intent rather than relying only on command-string d
 | Milestone | Status | Scope |
 | --- | --- | --- |
 | 0 — Foundation | Complete | Approved PRD, threat model, architecture decisions, v1 contracts, and clean-room provenance |
-| 1 — Local decision core | In progress | Typed contracts and monotonic policy evaluation implemented; parsing, adapters, resolution, audit construction, and CLI remain |
+| 1 — Local decision core | In progress | Typed contracts, monotonic policy evaluation, strict bounded Codex envelope parsing, and exact Bash/apply_patch payload extraction implemented; intent interpretation, resolution, audit construction, and CLI remain |
 | 2 — Approval and Codex integration | Not started | Bound approvals, replay protection, real `PreToolUse` integration, and enforcement diagnostics |
 | 3 — Broader adapters | Not started | Database, Kubernetes, cloud, IaC, and MCP adapters |
 
@@ -48,16 +48,18 @@ The dependency-free Rust workspace currently contains:
 
 - `ofw-contracts` — bounded identifiers, namespaced names, versions, operation effects, environment classes, reversibility, blast radius, policy layers, and restrictions.
 - `ofw-policy` — validated facts and selectors, immutable restriction union, duplicate identity rejection, canonical ordering, and conservative evaluation.
+- `ofw-adapter-codex` — dependency-free, bounded parsing for the documented `PreToolUse` envelope and exact Bash/apply_patch payload subsets with typed fail-safe outcomes.
 - Draft 2020-12 JSON schemas for operation intent, decisions, errors, policy bundles, and audit events.
 - Positive and negative contract fixtures with executable red-first vulnerability witnesses.
 - Property-style monotonicity coverage and a deliberate last-writer-wins counterexample proving the security test can fail.
 
-Canonical-path selectors currently return `indeterminate` until a platform resolver supplies boundary-safe canonical path facts. JSON parsing, snapshot hashing, target resolution, audit construction, CLI commands, approval capabilities, and live hook integration are not yet implemented.
+Canonical-path selectors currently return `indeterminate` until a platform resolver supplies boundary-safe canonical path facts. Shell/filesystem/Git intent interpretation, v1 contract deserialization, snapshot hashing, target resolution, audit construction, CLI commands, approval capabilities, and live hook integration are not yet implemented.
 
 ## Repository layout
 
 ```text
 crates/
+  ofw-adapter-codex/   Strict bounded parsing and payload extraction for Codex
   ofw-contracts/       Validated domain primitives
   ofw-policy/          Monotonic restriction evaluation
 policy/

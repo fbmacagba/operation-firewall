@@ -5,7 +5,7 @@ decision #2 ("Exact Codex hook protocols and execution paths available to the
 first integration").
 
 Sources: official docs at `developers.openai.com/codex/hooks` (redirects to
-`learn.chatgpt.com/docs/hooks`), corroborated against local examples of
+`learn.chatgpt.com/docs/hooks`, re-checked 2026-08-01), corroborated against local examples of
 shipped Codex plugins with `hooks.json` (figma, replayio) and the
 `.codex-plugin/plugin.json` spec bundled with this machine's Codex install.
 No Codex source was read to derive this — findings come from the published
@@ -66,8 +66,11 @@ reading `openai/codex` source.
 }
 ```
 
-For `Bash`/`apply_patch`, `tool_input` carries a `command` field. For MCP
-tools, `tool_input` is the tool's own argument object.
+For `Bash` and `apply_patch`, the current official event table specifies a
+string `tool_input.command` field. For MCP tools, `tool_input` is the tool's
+own argument object. Operation Firewall's implemented adapter subset accepts
+only the exact command-only object documented in
+[`docs/milestone-1/codex-tool-input-extraction.md`](../milestone-1/codex-tool-input-extraction.md).
 
 ### stdout shape — decision values
 
@@ -139,8 +142,6 @@ we hit it before Codex's does.
 - The exact relative path/name Codex expects for this plugin's `hooks.json`
   once `hooks/` has real content (docs show the manifest key as
   configurable; needs confirming against this plugin's actual layout).
-- Whether `apply_patch`'s `tool_input.command`-equivalent field name matches
-  `Bash`'s, or has its own shape — docs excerpt didn't show it in full.
 - Whether a hook's own **crash** (not just malformed output) is
   distinguishable from a hook that legitimately exits 1 — both may collapse
   to the same "hook failed → proceed" host behavior; worth a live probe
