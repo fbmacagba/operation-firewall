@@ -17,3 +17,5 @@ graph-out/
 .aramid/
 .graphite*
 .cache/
+
+.githooks/
