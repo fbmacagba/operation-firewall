@@ -11,6 +11,14 @@ name = "ofw-contracts"
 version = "0.1.0"
 
 [[package]]
+name = "ofw-core"
+version = "0.1.0"
+dependencies = [
+ "ofw-contracts",
+ "ofw-policy",
+]
+
+[[package]]
 name = "ofw-policy"
 version = "0.1.0"
 dependencies = [

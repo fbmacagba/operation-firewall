@@ -413,6 +413,13 @@ impl EffectivePolicy {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PolicyOutcome {
+    /// No policy rule restricted this operation.
+    ///
+    /// This is **not** an authorization and must never be mapped to allow. It
+    /// means only that policy added nothing, which is also true of every
+    /// operation the system does not understand. A final allow additionally
+    /// requires a built-in supported-operation proof; compose the two with
+    /// `ofw_core::decide` rather than reading this variant directly.
     NoRestriction,
     Ask,
     Indeterminate,

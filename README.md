@@ -48,12 +48,15 @@ The dependency-free Rust workspace currently contains:
 
 - `ofw-contracts` — bounded identifiers, namespaced names, versions, operation effects, environment classes, reversibility, blast radius, policy layers, and restrictions.
 - `ofw-policy` — validated facts and selectors, immutable restriction union, duplicate identity rejection, bounded composition, canonical ordering, conservative evaluation, and separate diagnostics naming the rules an unavailable fact left unresolved.
+- `ofw-core` — the built-in safety baseline. A `SupportedOperationProof` cannot be constructed from unknown or incomplete evidence, its baseline is derived from that evidence rather than accepted from the caller, and `decide` joins it with the policy restriction so an absent proof is always `indeterminate` and `NoRestriction` never becomes an allow on its own.
 - `ofw-adapter-codex` — dependency-free, bounded parsing for the documented `PreToolUse` envelope and exact Bash/apply_patch payload subsets with typed fail-safe outcomes.
 - Draft 2020-12 JSON schemas for operation intent, decisions, errors, policy bundles, and audit events.
 - Positive and negative contract fixtures with executable red-first vulnerability witnesses.
 - Property-style monotonicity coverage plus retained counterexamples proving each security test can fail: last-writer-wins composition, inverted restriction ordering, unbounded composition, and discarded unresolved-rule identity.
 
 Monotonicity is currently guaranteed structurally rather than by check: `Restriction` has no `allow` variant and the only combinator is union, so a lower layer cannot express a weakening. `PolicyLayer` is recorded in rule identity but is not read during evaluation. Cross-layer precedence has one worked example rather than generated coverage, and the v1 deserializer that must reject a bundle rule with `effect: allow` — which the JSON Schema rejects today — is not yet written.
+
+The built-in baseline closes the composition half of the `NoRestriction` advisory: policy silence can no longer reach an allow, because allow now requires a proof whose derived baseline is allow. The advisory is **addressed, not closed** — `EffectivePolicy::evaluate` remains public and still returns `NoRestriction`, so nothing yet forces a caller through `ofw_core::decide`. That becomes structural when the CLI is the single entry point. The proof's evidence fields are also trusted inputs today: establishing that a target really is repository-local is the platform resolver's job, so until that lands a proof is only as strong as its constructor.
 
 Canonical-path selectors currently return `indeterminate` until a platform resolver supplies boundary-safe canonical path facts. Shell/filesystem/Git intent interpretation, v1 contract deserialization, snapshot hashing, target resolution, audit construction, CLI commands, approval capabilities, and live hook integration are not yet implemented.
 
@@ -63,6 +66,7 @@ Canonical-path selectors currently return `indeterminate` until a platform resol
 crates/
   ofw-adapter-codex/   Strict bounded parsing and payload extraction for Codex
   ofw-contracts/       Validated domain primitives
+  ofw-core/            Built-in safety baseline and final decision composition
   ofw-policy/          Monotonic restriction evaluation
 policy/
   schemas/v1/          Normative JSON Schema contracts

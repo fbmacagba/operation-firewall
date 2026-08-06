@@ -2,6 +2,7 @@
 members = [
     "crates/ofw-adapter-codex",
     "crates/ofw-contracts",
+    "crates/ofw-core",
     "crates/ofw-policy",
 ]
 resolver = "3"

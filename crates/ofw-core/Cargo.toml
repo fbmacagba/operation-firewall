@@ -1,0 +1,16 @@
+[package]
+name = "ofw-core"
+description = "Built-in safety baseline and final decision composition for Operation Firewall"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+ofw-contracts = { path = "../ofw-contracts" }
+ofw-policy = { path = "../ofw-policy" }
+
+[lints]
+workspace = true
