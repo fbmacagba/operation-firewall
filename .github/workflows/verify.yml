@@ -1,0 +1,77 @@
+# Deterministic verification gate for Operation Firewall.
+#
+# This runs the same command a developer runs locally (`scripts/verify.py`),
+# which covers contract-schema validation, rustfmt, Clippy with warnings
+# denied, and the workspace test suite. Keeping CI to that one entry point
+# means the local gate and the remote gate cannot drift apart.
+#
+# Actions are pinned to immutable commit identities, per
+# docs/superpowers/specs/2026-08-01-milestone-1-completion-design.md
+# ("GitHub Actions uses immutable commit identities for actions").
+#
+# Scope note: a green run is evidence for the checks named above on the
+# platforms in the matrix. It is not evidence of production enforcement, and
+# Milestone 1 artifacts remain development artifacts.
+
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      # Resolver behaviour is platform-specific by design; one platform
+      # failing must not mask the state of the other two.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Install the development-time contract validator
+        # Pinned: this validates the normative JSON Schema contracts, so its
+        # behaviour is part of the gate rather than incidental tooling.
+        run: python -m pip install --disable-pip-version-check jsonschema==4.25.1
+
+      - name: Install the pinned Rust toolchain
+        # rust-toolchain.toml pins the channel and components; installing it in
+        # an explicit step keeps toolchain-resolution failures out of the
+        # verification step's log.
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Record the resolved toolchain
+        run: |
+          rustc --version
+          cargo --version
+          cargo clippy --version
+          python --version
+
+      - name: Run the verification suite
+        run: python -B scripts/verify.py
