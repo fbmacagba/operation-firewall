@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/ofw-adapter-codex",
+    "crates/ofw-cli",
     "crates/ofw-contracts",
     "crates/ofw-core",
     "crates/ofw-policy",

@@ -1,0 +1,21 @@
+[package]
+name = "ofw-cli"
+description = "Non-interactive command line entry point for Operation Firewall"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ofw"
+path = "src/main.rs"
+
+[dependencies]
+ofw-adapter-codex = { path = "../ofw-adapter-codex" }
+ofw-core = { path = "../ofw-core" }
+ofw-policy = { path = "../ofw-policy" }
+
+[lints]
+workspace = true

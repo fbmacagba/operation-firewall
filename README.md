@@ -50,6 +50,7 @@ The dependency-free Rust workspace currently contains:
 - `ofw-policy` — validated facts and selectors, immutable restriction union, duplicate identity rejection, bounded composition, canonical ordering, conservative evaluation, and separate diagnostics naming the rules an unavailable fact left unresolved.
 - `ofw-core` — the built-in safety baseline. A `SupportedOperationProof` cannot be constructed from unknown or incomplete evidence, its baseline is derived from that evidence rather than accepted from the caller, and `decide` joins it with the policy restriction so an absent proof is always `indeterminate` and `NoRestriction` never becomes an allow on its own.
 - `ofw-adapter-codex` — dependency-free, bounded parsing for the documented `PreToolUse` envelope and exact Bash/apply_patch payload subsets with typed fail-safe outcomes.
+- `ofw-cli` — the non-interactive `ofw` binary: `hook codex-pre-tool-use`, `assess`, `doctor`, and `version`, with a dependency-free JSON writer.
 - Draft 2020-12 JSON schemas for operation intent, decisions, errors, policy bundles, and audit events.
 - Positive and negative contract fixtures with executable red-first vulnerability witnesses.
 - Property-style monotonicity coverage plus retained counterexamples proving each security test can fail: last-writer-wins composition, inverted restriction ordering, unbounded composition, and discarded unresolved-rule identity.
@@ -65,6 +66,7 @@ Canonical-path selectors currently return `indeterminate` until a platform resol
 ```text
 crates/
   ofw-adapter-codex/   Strict bounded parsing and payload extraction for Codex
+  ofw-cli/             The `ofw` binary: assess, doctor, and the Codex hook
   ofw-contracts/       Validated domain primitives
   ofw-core/            Built-in safety baseline and final decision composition
   ofw-policy/          Monotonic restriction evaluation
@@ -106,6 +108,18 @@ cargo test --workspace --all-targets --locked
 ```
 
 Every new security-invariant test must first demonstrate that it fails against a deliberately weakened implementation for the claimed reason. See the [test strategy](tests/README.md).
+
+### Running the CLI
+
+```powershell
+cargo run -p ofw-cli -- doctor
+Get-Content envelope.json | cargo run -p ofw-cli -- assess
+Get-Content envelope.json | cargo run -p ofw-cli -- hook codex-pre-tool-use
+```
+
+**Every hook invocation currently denies, and that is correct.** Intent interpretation is not implemented, so no operation can be proven supported, so no `SupportedOperationProof` exists, so `decide` returns `indeterminate`, which maps to a wire deny. `ofw doctor` reports `provable_operation_kinds: 0` and `enforcement: not_active` rather than implying broader capability.
+
+Deny is emitted as exit code 2 with the reason on stderr, leaving stdout empty. Codex fails **open** — malformed stdout, empty stdout with exit 0, an unrecognized output field, a timeout, and exit 1 all let the tool call proceed — so a partially written JSON deny object would be worse than no object at all, whereas an exit code cannot be partially written. The explicit allow object's shape is inferred from the documented deny form and is **not yet confirmed against a live Codex**; it is unreachable today and flagged in the code as an open item.
 
 ### Continuous verification
 

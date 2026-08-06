@@ -7,6 +7,15 @@ name = "ofw-adapter-codex"
 version = "0.1.0"
 
 [[package]]
+name = "ofw-cli"
+version = "0.1.0"
+dependencies = [
+ "ofw-adapter-codex",
+ "ofw-core",
+ "ofw-policy",
+]
+
+[[package]]
 name = "ofw-contracts"
 version = "0.1.0"
 
