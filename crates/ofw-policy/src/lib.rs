@@ -519,8 +519,8 @@ mod tests {
 
     use super::{
         EffectivePolicy, EffectiveRuleIdentity, Fact, MAX_BUNDLES, MAX_EFFECTIVE_RULES,
-        OperationFacts, PolicyError, PolicyEvaluation, PolicyOutcome, RestrictionRule, Selectors,
-        ValidatedPolicyBundle,
+        MAX_RULES_PER_BUNDLE, OperationFacts, PolicyError, PolicyEvaluation, PolicyOutcome,
+        RestrictionRule, Selectors, ValidatedPolicyBundle,
     };
 
     fn identifier(value: &str) -> Identifier {
@@ -888,8 +888,14 @@ mod tests {
         assert!(Restriction::Ask < Restriction::Deny);
     }
 
+    // The two composition bounds are asserted in separate tests on purpose.
+    // Combined, the bundle-count assertion aborts the test before the
+    // rule-count assertion is reached, so a weakened build could only ever
+    // prove the first guard load-bearing. Split, each guard has its own
+    // independent red-first evidence.
+
     #[test]
-    fn red_first_witness_detects_unbounded_composition() {
+    fn red_first_witness_detects_unbounded_bundle_count() {
         let excess_bundles: Vec<_> = (0..=MAX_BUNDLES)
             .map(|index| {
                 bundle(
@@ -906,13 +912,17 @@ mod tests {
         ));
         // The retained unbounded form accepts the same input.
         assert!(vulnerable_unbounded_compose(&excess_bundles).is_ok());
+    }
 
+    #[test]
+    fn red_first_witness_detects_unbounded_effective_rule_count() {
         // The aggregate rule bound is independent of the per-bundle bound:
-        // five bundles of 2,048 rules each stay under `MAX_RULES_PER_BUNDLE`
-        // and under `MAX_BUNDLES`, yet exceed `MAX_EFFECTIVE_RULES`.
+        // five bundles of exactly `MAX_RULES_PER_BUNDLE` rules each are
+        // individually valid and stay under `MAX_BUNDLES`, yet together
+        // exceed `MAX_EFFECTIVE_RULES`.
         let excess_rules: Vec<_> = (0..5)
             .map(|bundle_index| {
-                let rules = (0..2_048)
+                let rules = (0..MAX_RULES_PER_BUNDLE)
                     .map(|rule_index| rule(&format!("rule-{rule_index}"), Restriction::Deny))
                     .collect();
                 bundle(
@@ -922,11 +932,14 @@ mod tests {
                 )
             })
             .collect();
-        // Compile-time guard: if the bounds are ever retuned so that this
-        // fixture no longer exceeds the aggregate limit, the test stops being
-        // able to prove anything and must fail to build rather than pass
-        // vacuously.
-        const { assert!(5 * 2_048 > MAX_EFFECTIVE_RULES) };
+
+        // Compile-time guards: if the bounds are ever retuned so that this
+        // fixture stops exceeding the aggregate limit, or starts tripping the
+        // bundle limit instead, the test must fail to build rather than pass
+        // for a reason it does not claim.
+        const { assert!(5 * MAX_RULES_PER_BUNDLE > MAX_EFFECTIVE_RULES) };
+        const { assert!(5 <= MAX_BUNDLES) };
+
         assert!(matches!(
             EffectivePolicy::compose(excess_rules.clone()),
             Err(PolicyError::TooManyEffectiveRules)
