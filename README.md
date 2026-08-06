@@ -47,11 +47,13 @@ The Codex `PreToolUse` wire exposes only `allow` and `deny`. Internal `ask` must
 The dependency-free Rust workspace currently contains:
 
 - `ofw-contracts` — bounded identifiers, namespaced names, versions, operation effects, environment classes, reversibility, blast radius, policy layers, and restrictions.
-- `ofw-policy` — validated facts and selectors, immutable restriction union, duplicate identity rejection, canonical ordering, and conservative evaluation.
+- `ofw-policy` — validated facts and selectors, immutable restriction union, duplicate identity rejection, bounded composition, canonical ordering, conservative evaluation, and separate diagnostics naming the rules an unavailable fact left unresolved.
 - `ofw-adapter-codex` — dependency-free, bounded parsing for the documented `PreToolUse` envelope and exact Bash/apply_patch payload subsets with typed fail-safe outcomes.
 - Draft 2020-12 JSON schemas for operation intent, decisions, errors, policy bundles, and audit events.
 - Positive and negative contract fixtures with executable red-first vulnerability witnesses.
-- Property-style monotonicity coverage and a deliberate last-writer-wins counterexample proving the security test can fail.
+- Property-style monotonicity coverage plus retained counterexamples proving each security test can fail: last-writer-wins composition, inverted restriction ordering, unbounded composition, and discarded unresolved-rule identity.
+
+Monotonicity is currently guaranteed structurally rather than by check: `Restriction` has no `allow` variant and the only combinator is union, so a lower layer cannot express a weakening. `PolicyLayer` is recorded in rule identity but is not read during evaluation. Cross-layer precedence has one worked example rather than generated coverage, and the v1 deserializer that must reject a bundle rule with `effect: allow` — which the JSON Schema rejects today — is not yet written.
 
 Canonical-path selectors currently return `indeterminate` until a platform resolver supplies boundary-safe canonical path facts. Shell/filesystem/Git intent interpretation, v1 contract deserialization, snapshot hashing, target resolution, audit construction, CLI commands, approval capabilities, and live hook integration are not yet implemented.
 
@@ -100,6 +102,10 @@ cargo test --workspace --all-targets --locked
 ```
 
 Every new security-invariant test must first demonstrate that it fails against a deliberately weakened implementation for the claimed reason. See the [test strategy](tests/README.md).
+
+### Continuous verification
+
+`.github/workflows/verify.yml` runs the same `scripts/verify.py` entry point on Linux, Windows, and macOS for every push to `main` and every pull request, so the local gate and the remote gate cannot drift apart. Actions are pinned to immutable commit identities. A green run is evidence for contract validation, formatting, Clippy, and the test suite on those platforms — not evidence of production enforcement.
 
 ### Graphite and Aramid
 

@@ -226,12 +226,35 @@ mod tests {
     use super::{ContractError, Identifier, NamespacedName, Version};
 
     #[test]
-    fn identifier_rejects_path_traversal_whitespace() {
-        let result = Identifier::new("repo/../ escaped");
+    fn identifier_rejects_whitespace() {
+        // Byte 8 is the space in "repo/../ escaped". Pinning the index keeps
+        // this test honest about *why* the value is rejected: the preceding
+        // "../" is accepted, as `identifier_is_not_a_path_type` records.
         assert!(matches!(
-            result,
-            Err(ContractError::InvalidIdentifierCharacter { .. })
+            Identifier::new("repo/../ escaped"),
+            Err(ContractError::InvalidIdentifierCharacter { index: 8 })
         ));
+    }
+
+    /// Behaviour-pinning test, not a security invariant: there is no weakened
+    /// implementation this could be red against, because permitting these
+    /// characters is the contract.
+    ///
+    /// The v1 `boundedId` pattern (`^[A-Za-z0-9][A-Za-z0-9._:@/-]*$`) admits
+    /// `/` and `.`, so an identifier may contain path-shaped text including
+    /// traversal segments. That is deliberate: `Identifier` names rules,
+    /// bundles, sessions and actors -- never a filesystem target. Path
+    /// containment belongs to the platform resolver, which canonicalizes
+    /// against a trusted boundary using native APIs.
+    ///
+    /// Pinned so no later reader mistakes the whitespace rejection above for
+    /// traversal rejection, and so that giving `Identifier` a path-typed role
+    /// has to break a test that says why it must not.
+    #[test]
+    fn identifier_is_not_a_path_type() {
+        assert!(Identifier::new("repo/../escaped").is_ok());
+        assert!(Identifier::new("etc/passwd").is_ok());
+        assert!(Identifier::new("../../secrets").is_err()); // leading '.' only
     }
 
     #[test]

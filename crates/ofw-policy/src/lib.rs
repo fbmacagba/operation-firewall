@@ -11,6 +11,12 @@ const MAX_RULES_PER_BUNDLE: usize = 2_048;
 const MAX_SELECTOR_VALUES: usize = 64;
 const MAX_TARGET_KINDS: usize = 256;
 
+/// Composition-wide bounds. `MAX_RULES_PER_BUNDLE` bounds one bundle; without
+/// these, an unbounded bundle count makes an effective policy unbounded, and
+/// evaluation is linear in the effective rule count under a caller deadline.
+const MAX_BUNDLES: usize = 32;
+const MAX_EFFECTIVE_RULES: usize = 8_192;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Fact<T> {
     Known(T),
@@ -316,7 +322,13 @@ impl EffectivePolicy {
             if !bundle_identities.insert(bundle_identity) {
                 return Err(PolicyError::DuplicateBundleIdentity);
             }
+            if bundle_identities.len() > MAX_BUNDLES {
+                return Err(PolicyError::TooManyBundles);
+            }
             for rule in bundle.rules {
+                if rules.len() >= MAX_EFFECTIVE_RULES {
+                    return Err(PolicyError::TooManyEffectiveRules);
+                }
                 rules.push(EffectiveRule {
                     identity: EffectiveRuleIdentity {
                         layer: bundle.layer,
@@ -350,6 +362,7 @@ impl EffectivePolicy {
     pub fn evaluate(&self, facts: &OperationFacts) -> PolicyEvaluation {
         let mut ask_rules = Vec::new();
         let mut deny_rules = Vec::new();
+        let mut indeterminate_rules = Vec::new();
         let mut missing_facts = BTreeSet::new();
 
         for effective_rule in &self.rules {
@@ -359,7 +372,10 @@ impl EffectivePolicy {
                     Restriction::Ask => ask_rules.push(effective_rule.identity.clone()),
                     Restriction::Deny => deny_rules.push(effective_rule.identity.clone()),
                 },
-                RuleApplicability::Indeterminate(missing) => missing_facts.extend(missing),
+                RuleApplicability::Indeterminate(missing) => {
+                    missing_facts.extend(missing);
+                    indeterminate_rules.push(effective_rule.identity.clone());
+                }
             }
         }
 
@@ -367,24 +383,28 @@ impl EffectivePolicy {
             PolicyEvaluation {
                 outcome: PolicyOutcome::Deny,
                 determining_rules: deny_rules,
+                indeterminate_rules,
                 missing_facts,
             }
         } else if !missing_facts.is_empty() {
             PolicyEvaluation {
                 outcome: PolicyOutcome::Indeterminate,
                 determining_rules: Vec::new(),
+                indeterminate_rules,
                 missing_facts,
             }
         } else if !ask_rules.is_empty() {
             PolicyEvaluation {
                 outcome: PolicyOutcome::Ask,
                 determining_rules: ask_rules,
+                indeterminate_rules,
                 missing_facts,
             }
         } else {
             PolicyEvaluation {
                 outcome: PolicyOutcome::NoRestriction,
                 determining_rules: Vec::new(),
+                indeterminate_rules,
                 missing_facts,
             }
         }
@@ -402,7 +422,16 @@ pub enum PolicyOutcome {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PolicyEvaluation {
     pub outcome: PolicyOutcome,
+    /// Rules at the winning restriction level, per the v1 decision contract.
+    /// An `Indeterminate` outcome has no determining rule: the contract's
+    /// `effect` enum admits only `allow`, `ask`, and `deny`, so listing an
+    /// unresolved rule here would misreport it as having determined one.
     pub determining_rules: Vec<EffectiveRuleIdentity>,
+    /// Diagnostics: rules that could not be decided because a selector needed
+    /// a fact that was unavailable. `contracts-v1.md` allows diagnostics to
+    /// list non-determining matches separately. Without this, an operator sees
+    /// only which *fact* was missing and cannot tell which rule required it.
+    pub indeterminate_rules: Vec<EffectiveRuleIdentity>,
     pub missing_facts: BTreeSet<MissingFact>,
 }
 
@@ -435,7 +464,9 @@ pub enum PolicyError {
     InvalidRationale,
     InvalidRiskCategories,
     InvalidSaferAlternatives,
+    TooManyBundles,
     TooManyCanonicalPathPrefixes,
+    TooManyEffectiveRules,
     TooManyRules,
     TooManySelectorValues,
     TooManyTargetKinds,
@@ -487,8 +518,9 @@ mod tests {
     };
 
     use super::{
-        EffectivePolicy, Fact, OperationFacts, PolicyError, PolicyOutcome, RestrictionRule,
-        Selectors, ValidatedPolicyBundle,
+        EffectivePolicy, EffectiveRuleIdentity, Fact, MAX_BUNDLES, MAX_EFFECTIVE_RULES,
+        OperationFacts, PolicyError, PolicyEvaluation, PolicyOutcome, RestrictionRule, Selectors,
+        ValidatedPolicyBundle,
     };
 
     fn identifier(value: &str) -> Identifier {
@@ -820,6 +852,161 @@ mod tests {
 
         assert!(!invariant(vulnerable_last_writer_wins));
         assert!(invariant(restriction_union));
+    }
+
+    #[test]
+    fn red_first_witness_detects_inverted_restriction_ordering() {
+        // Every "more restrictive" comparison in this crate and its tests
+        // resolves through `Restriction`'s derived `Ord`, which follows
+        // declaration order. `red_first_witness_detects_last_writer_wins_
+        // vulnerability` cannot catch a reordering, because both sides of its
+        // `>=` invert together. Pin the ordering directly instead.
+        #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+        enum InvertedRestriction {
+            Deny,
+            Ask,
+        }
+
+        fn most_restrictive<T: Copy + Ord>(values: &[T], fallback: T) -> T {
+            values.iter().copied().max().unwrap_or(fallback)
+        }
+
+        // Under the real ordering a deny in the set wins.
+        assert_eq!(
+            most_restrictive(&[Restriction::Deny, Restriction::Ask], Restriction::Ask),
+            Restriction::Deny
+        );
+        // The retained inverted witness silently returns the weaker value from
+        // the identical union.
+        assert_eq!(
+            most_restrictive(
+                &[InvertedRestriction::Deny, InvertedRestriction::Ask],
+                InvertedRestriction::Ask
+            ),
+            InvertedRestriction::Ask
+        );
+        assert!(Restriction::Ask < Restriction::Deny);
+    }
+
+    #[test]
+    fn red_first_witness_detects_unbounded_composition() {
+        let excess_bundles: Vec<_> = (0..=MAX_BUNDLES)
+            .map(|index| {
+                bundle(
+                    PolicyLayer::Organization,
+                    &format!("org.bundle{index}"),
+                    vec![rule("deny-force-update", Restriction::Deny)],
+                )
+            })
+            .collect();
+
+        assert!(matches!(
+            EffectivePolicy::compose(excess_bundles.clone()),
+            Err(PolicyError::TooManyBundles)
+        ));
+        // The retained unbounded form accepts the same input.
+        assert!(vulnerable_unbounded_compose(&excess_bundles).is_ok());
+
+        // The aggregate rule bound is independent of the per-bundle bound:
+        // five bundles of 2,048 rules each stay under `MAX_RULES_PER_BUNDLE`
+        // and under `MAX_BUNDLES`, yet exceed `MAX_EFFECTIVE_RULES`.
+        let excess_rules: Vec<_> = (0..5)
+            .map(|bundle_index| {
+                let rules = (0..2_048)
+                    .map(|rule_index| rule(&format!("rule-{rule_index}"), Restriction::Deny))
+                    .collect();
+                bundle(
+                    PolicyLayer::Organization,
+                    &format!("org.big{bundle_index}"),
+                    rules,
+                )
+            })
+            .collect();
+        // Compile-time guard: if the bounds are ever retuned so that this
+        // fixture no longer exceeds the aggregate limit, the test stops being
+        // able to prove anything and must fail to build rather than pass
+        // vacuously.
+        const { assert!(5 * 2_048 > MAX_EFFECTIVE_RULES) };
+        assert!(matches!(
+            EffectivePolicy::compose(excess_rules.clone()),
+            Err(PolicyError::TooManyEffectiveRules)
+        ));
+        assert!(vulnerable_unbounded_compose(&excess_rules).is_ok());
+    }
+
+    #[test]
+    fn red_first_witness_detects_discarded_indeterminate_rule_identity() {
+        let selectors = match Selectors::for_operation_kind(name("git.force_update"))
+            .with_canonical_path_prefixes(["F:/protected".to_owned()])
+        {
+            Ok(selectors) => selectors,
+            Err(error) => unreachable!("test selectors must be valid: {error:?}"),
+        };
+        let unresolved_rule = match RestrictionRule::new(
+            identifier("protect-path"),
+            Restriction::Deny,
+            selectors,
+            BTreeSet::from([name("filesystem.protected_path")]),
+            "Protect the canonical path.",
+            Vec::new(),
+        ) {
+            Ok(rule) => rule,
+            Err(error) => unreachable!("test rule must be valid: {error:?}"),
+        };
+        let effective = policy(vec![bundle(
+            PolicyLayer::Organization,
+            "org.paths",
+            vec![unresolved_rule],
+        )]);
+        let evaluation = effective.evaluate(&complete_facts());
+
+        // The invariant: an indeterminate outcome names the rule that could not
+        // be resolved, not merely the fact class that was unavailable.
+        let names_the_unresolved_rule = |identities: &[EffectiveRuleIdentity]| {
+            identities.len() == 1 && identities[0].rule_id == identifier("protect-path")
+        };
+
+        assert_eq!(evaluation.outcome, PolicyOutcome::Indeterminate);
+        assert!(names_the_unresolved_rule(&evaluation.indeterminate_rules));
+        // The retained pre-fix behaviour recorded the missing fact and dropped
+        // the identity, leaving an operator unable to tell which rule blocked.
+        assert!(!names_the_unresolved_rule(
+            &vulnerable_discards_indeterminate_identities(&evaluation)
+        ));
+
+        // `determining_rules` must stay empty: the v1 decision contract's
+        // `effect` enum admits only allow/ask/deny, so an unresolved rule
+        // listed there would misreport it as having determined a deny.
+        assert!(evaluation.determining_rules.is_empty());
+    }
+
+    /// Retained red-first witness: composition without the aggregate bounds.
+    fn vulnerable_unbounded_compose(
+        bundles: &[ValidatedPolicyBundle],
+    ) -> Result<usize, PolicyError> {
+        let mut total = 0_usize;
+        let mut identities = BTreeSet::new();
+        for bundle in bundles {
+            let identity = (
+                bundle.layer,
+                bundle.bundle_id.clone(),
+                bundle.bundle_version.clone(),
+            );
+            if !identities.insert(identity) {
+                return Err(PolicyError::DuplicateBundleIdentity);
+            }
+            total += bundle.rules.len();
+        }
+        Ok(total)
+    }
+
+    /// Retained red-first witness: the pre-fix evaluator recorded which fact was
+    /// missing but discarded which rule required it.
+    fn vulnerable_discards_indeterminate_identities(
+        evaluation: &PolicyEvaluation,
+    ) -> Vec<EffectiveRuleIdentity> {
+        let _ = evaluation;
+        Vec::new()
     }
 
     fn policy_from_mask(candidates: &[Restriction], mask: u8) -> EffectivePolicy {
