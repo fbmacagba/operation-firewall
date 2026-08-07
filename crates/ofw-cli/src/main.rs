@@ -296,11 +296,21 @@ fn run_doctor() {
     // Reported as configured or not, never as its contents: the paths are
     // local filesystem layout and the diagnostics output is copied into bug
     // reports.
-    let configured = trusted_configuration().is_some();
+    //
+    // Configured and usable are separate questions, and reporting only the
+    // first is how diagnostics start overstating. `TrustedConfiguration::new`
+    // validates shape, not existence, so a boundary containing a typo is
+    // well-formed configuration against which nothing resolves.
+    let configuration_state = trusted_configuration();
+    let configured = configuration_state.is_some();
+    let resolvable = configuration_state
+        .as_ref()
+        .is_some_and(TrustedConfiguration::paths_resolvable);
     let mut configuration = json::Object::new();
     configuration
         .string("source", "process_environment")
         .boolean("configured", configured)
+        .boolean("paths_resolvable", resolvable)
         .strings(
             "required_variables",
             &[
@@ -322,9 +332,10 @@ fn run_doctor() {
         .object("adapter", adapter)
         .object("components", implemented)
         .object("trusted_configuration", configuration)
-        // Provable only when trusted configuration is present: without it
-        // nothing can be placed, so nothing can be proven.
-        .integer("provable_operation_kinds", if configured { 2 } else { 0 })
+        // Provable only when the configuration is present *and* its paths
+        // actually resolve. Counting on presence alone would report a typo as
+        // two provable kinds while every assessment came out indeterminate.
+        .integer("provable_operation_kinds", if resolvable { 2 } else { 0 })
         .strings("provable_operations", &["git.status", "git.rev_parse"])
         .string("enforcement", "not_active")
         .string("hook_registration", "unconfirmed")

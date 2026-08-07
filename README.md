@@ -133,6 +133,8 @@ A defaulted working directory would be whatever launched the hook, and a default
 
 Reading configuration from the environment is explicit and outside the repository, but it is **weaker than the design requires** — a bounded configuration file whose ownership and permissions are verified at startup. `ofw doctor` reports that gap rather than leaving it to be discovered.
 
+`ofw doctor` reports `configured` and `paths_resolvable` separately, and counts provable operation kinds on the second. Configuration is validated for shape, not existence, so a boundary containing a typo is well-formed configuration against which nothing resolves; reporting only `configured: true` would read as "set up correctly" while every assessment came out indeterminate.
+
 **Every hook invocation currently denies, and that is correct.** Read-only Git operations can now be *proven* — a `SupportedOperationProof` exists and `decide` returns a real `ask` rather than `indeterminate` — but `ask` has no Codex wire representation and denies until Milestone 2 binds an approval. This slice produces the first proof, not the first allow.
 
 The reason code records how far down the pipeline an operation actually reached:

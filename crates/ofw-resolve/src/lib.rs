@@ -128,6 +128,22 @@ impl TrustedConfiguration {
     pub const fn environment(&self) -> EnvironmentClass {
         self.environment
     }
+
+    /// Whether both configured paths canonicalize on this filesystem.
+    ///
+    /// For diagnostics only, and never consulted on the decision path: a
+    /// decision must be made against the paths as they are at the moment of
+    /// resolution, not against a probe that ran earlier.
+    ///
+    /// It exists because [`TrustedConfiguration::new`] validates shape and not
+    /// existence, so a configuration containing a typo is well-formed. Without
+    /// this, `ofw doctor` would report a typo as correctly configured while
+    /// every assessment against it came out indeterminate.
+    #[must_use]
+    pub fn paths_resolvable(&self) -> bool {
+        canonicalize(&self.working_directory).is_some()
+            && canonicalize(&self.repository_boundary).is_some()
+    }
 }
 
 /// Maps a configuration label to an environment class.
@@ -580,6 +596,27 @@ mod tests {
         assert_eq!(
             environment_from_label("production"),
             Some(EnvironmentClass::Production)
+        );
+    }
+
+    /// Shape and existence are separate questions, and the constructor only
+    /// answers the first. Diagnostics that conflated them would report a typo
+    /// as working configuration.
+    #[test]
+    fn a_well_formed_configuration_can_still_name_nothing() {
+        let present = directory("resolvable");
+        assert!(configuration(present.clone(), present.clone()).paths_resolvable());
+
+        let mut absent = present.clone();
+        absent.push("no-such-directory");
+        let typo = configuration(absent, present);
+        // Well formed...
+        assert!(typo.working_directory().is_absolute());
+        // ...and nothing is there.
+        assert!(!typo.paths_resolvable());
+        assert_eq!(
+            resolve(&git_status(), &typo),
+            Err(ResolutionError::WorkingDirectoryUnresolvable)
         );
     }
 

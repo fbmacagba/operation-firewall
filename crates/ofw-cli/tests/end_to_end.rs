@@ -67,6 +67,16 @@ fn cross_boundary() -> Vec<(&'static str, String)> {
     )
 }
 
+/// Well-formed configuration naming a boundary that is not on the filesystem.
+///
+/// `TrustedConfiguration::new` validates shape, not existence, so this is what
+/// an operator typo produces.
+fn unresolvable() -> Vec<(&'static str, String)> {
+    let mut absent = directory("unresolvable");
+    absent.push("no-such-directory");
+    configuration(&absent, &absent)
+}
+
 fn configuration(working: &Path, boundary: &Path) -> Vec<(&'static str, String)> {
     vec![
         (WORKING_DIRECTORY_VARIABLE, text(working)),
@@ -398,6 +408,7 @@ fn doctor_reports_what_is_implemented_without_overstating_it() {
         "\"built_in_baseline\":\"implemented\"",
         // Unconfigured: nothing can be placed, so nothing is provable.
         "\"configured\":false",
+        "\"paths_resolvable\":false",
         "\"provable_operation_kinds\":0",
     ] {
         assert!(
@@ -411,11 +422,52 @@ fn doctor_reports_what_is_implemented_without_overstating_it() {
 fn doctor_reports_provable_operations_only_once_configured() {
     let payload = stdout(&run_with(&["doctor"], b"", &contained()));
     assert!(payload.contains("\"configured\":true"), "got: {payload}");
+    assert!(payload.contains("\"paths_resolvable\":true"));
     assert!(payload.contains("\"provable_operation_kinds\":2"));
     // Still not an active protection boundary, and it must not start claiming
     // to be one just because something became provable.
     assert!(payload.contains("\"enforcement\":\"not_active\""));
     assert!(payload.contains("\"effective_wire_behaviour\":\"every operation denies\""));
+}
+
+/// Configuration that is well formed and names nothing.
+///
+/// Reporting it as configured is correct -- it is. Reporting two provable
+/// operation kinds would not be: nothing resolves against it, so every
+/// assessment is indeterminate. An operator with a typo would read a bare
+/// `configured: true` as "set up correctly".
+#[test]
+fn an_unresolvable_configuration_denies_and_doctor_does_not_claim_it_works() {
+    let configured = unresolvable();
+
+    let payload = stdout(&run_with(
+        &["assess"],
+        envelope("Bash", "git status").as_bytes(),
+        &configured,
+    ));
+    assert!(
+        payload.contains("\"reason_code\":\"TARGET_RESOLUTION_INDETERMINATE\""),
+        "got: {payload}"
+    );
+    assert!(payload.contains("\"outcome\":\"indeterminate\""));
+    assert!(payload.contains("\"supported_operation_proof\":false"));
+
+    let hooked = run_with(
+        &["hook", "codex-pre-tool-use"],
+        envelope("Bash", "git status").as_bytes(),
+        &configured,
+    );
+    assert_eq!(code(&hooked), EXIT_DENY);
+    assert!(hooked.stdout.is_empty());
+
+    let doctor = stdout(&run_with(&["doctor"], b"", &configured));
+    assert!(doctor.contains("\"configured\":true"), "got: {doctor}");
+    assert!(doctor.contains("\"paths_resolvable\":false"));
+    assert!(
+        doctor.contains("\"provable_operation_kinds\":0"),
+        "doctor must not claim provable kinds against a boundary that does not \
+         resolve, got: {doctor}"
+    );
 }
 
 #[test]

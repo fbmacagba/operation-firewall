@@ -426,8 +426,8 @@ mod tests {
 
     use super::{
         APPROVAL_REQUIRED, Assessment, BASELINE_DENIED, COMMAND_NOT_LITERAL,
-        INTERPRETATION_UNSUPPORTED, TARGET_RESOLUTION_UNSUPPORTED, TOOL_UNSUPPORTED,
-        TRUSTED_CONFIGURATION_MISSING, assess, outcome_name, policy_evaluation,
+        INTERPRETATION_UNSUPPORTED, TOOL_UNSUPPORTED, TRUSTED_CONFIGURATION_MISSING, assess,
+        outcome_name, policy_evaluation,
     };
 
     fn directory(label: &str) -> PathBuf {
@@ -617,17 +617,23 @@ mod tests {
         );
     }
 
-    /// An interpreted operation whose targets the resolver has no rule for is
-    /// reported as unsupported rather than as a decision.
+    /// Both interpreted kinds reach a proof, not just the one the other tests
+    /// use.
+    ///
+    /// `TARGET_RESOLUTION_UNSUPPORTED` is currently unreachable from here:
+    /// this function narrows to `git.status` and `git.rev_parse` before
+    /// calling the resolver, both have a declared target scope, both carry
+    /// zero operands and both are reads. It is retained as the mapping that
+    /// must exist the moment the narrowing list and the resolver's scope list
+    /// stop agreeing -- but no test can exercise it, and asserting that some
+    /// other reason came back would not be exercising it either.
     #[test]
-    fn an_unresolved_target_scope_is_reported_as_unsupported() {
-        // `git rev-parse --show-toplevel` is interpreted and repository
-        // scoped, so this asserts the resolvable case stays resolvable; the
-        // unsupported branch is exercised at the resolver's own boundary.
-        let assessment = assess_str(&bash("git rev-parse --show-toplevel"), Some(&contained()));
-        assert_eq!(assessment.operation_kind, Some("git.rev_parse"));
-        assert!(assessment.proof_present);
-        assert_ne!(assessment.reason, TARGET_RESOLUTION_UNSUPPORTED);
+    fn both_interpreted_kinds_reach_a_proof() {
+        for command in ["git status", "git rev-parse --show-toplevel"] {
+            let assessment = assess_str(&bash(command), Some(&contained()));
+            assert!(assessment.proof_present, "{command} must be provable");
+            assert_eq!(assessment.outcome, DecisionOutcome::Ask);
+        }
     }
 
     #[test]
