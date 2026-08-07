@@ -1,13 +1,45 @@
 #![forbid(unsafe_code)]
 
+//! Validated domain primitives and their v1 wire vocabulary.
+//!
+//! # Deserialization goes through validation, never around it
+//!
+//! Every bounded newtype here deserializes via `try_from = "String"`, so the
+//! only way to obtain one from JSON is the same constructor an in-process
+//! caller must use. There is no `Deserialize` path that constructs an
+//! unvalidated value, which is what stops a parsed contract from being weaker
+//! than a hand-built one.
+//!
+//! Enum wire spellings are pinned by test against the JSON Schema contracts
+//! rather than inherited from a rename attribute and hoped to match: a silent
+//! rename is a silent contract break, and for a selector vocabulary it is a
+//! rule that stops matching what it used to match.
+
 use core::fmt;
+
+use serde::{Deserialize, Serialize};
 
 const MAX_IDENTIFIER_LENGTH: usize = 256;
 const MAX_NAMESPACED_NAME_LENGTH: usize = 128;
 const MAX_VERSION_LENGTH: usize = 64;
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(into = "String", try_from = "String")]
 pub struct Identifier(String);
+
+impl TryFrom<String> for Identifier {
+    type Error = ContractError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<Identifier> for String {
+    fn from(value: Identifier) -> Self {
+        value.0
+    }
+}
 
 impl Identifier {
     pub fn new(value: impl Into<String>) -> Result<Self, ContractError> {
@@ -22,8 +54,23 @@ impl Identifier {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(into = "String", try_from = "String")]
 pub struct NamespacedName(String);
+
+impl TryFrom<String> for NamespacedName {
+    type Error = ContractError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<NamespacedName> for String {
+    fn from(value: NamespacedName) -> Self {
+        value.0
+    }
+}
 
 impl NamespacedName {
     pub fn new(value: impl Into<String>) -> Result<Self, ContractError> {
@@ -47,8 +94,23 @@ impl NamespacedName {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(into = "String", try_from = "String")]
 pub struct Version(String);
+
+impl TryFrom<String> for Version {
+    type Error = ContractError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<Version> for String {
+    fn from(value: Version) -> Self {
+        value.0
+    }
+}
 
 impl Version {
     pub fn new(value: impl Into<String>) -> Result<Self, ContractError> {
@@ -91,12 +153,44 @@ impl Version {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+/// Which layer a rule came from.
+///
+/// Deliberately **not** deserializable. `Builtin` is the layer the built-in
+/// safety baseline occupies, and a supplied bundle that could name it would be
+/// claiming to be the baseline. External bundles use [`ExternalPolicyLayer`],
+/// which cannot express `Builtin` at all -- a structural guard rather than a
+/// validation step that a later refactor could drop.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PolicyLayer {
     Builtin,
     Organization,
     User,
     Repository,
+}
+
+/// The layers a supplied policy bundle may declare.
+///
+/// The v1 policy-bundle contract admits `organization`, `user` and
+/// `repository`. `builtin` is absent from this type for the reason above, so
+/// `"layer": "builtin"` in a bundle file is an unknown variant and the bundle
+/// is rejected outright.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalPolicyLayer {
+    Organization,
+    User,
+    Repository,
+}
+
+impl From<ExternalPolicyLayer> for PolicyLayer {
+    fn from(value: ExternalPolicyLayer) -> Self {
+        match value {
+            ExternalPolicyLayer::Organization => Self::Organization,
+            ExternalPolicyLayer::User => Self::User,
+            ExternalPolicyLayer::Repository => Self::Repository,
+        }
+    }
 }
 
 impl PolicyLayer {
@@ -106,13 +200,22 @@ impl PolicyLayer {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+/// A restriction a rule may impose.
+///
+/// There is no `Allow` variant and there never may be. The v1 contract's rule
+/// `effect` enum is `["ask", "deny"]`, so `"effect": "allow"` in a supplied
+/// bundle is an unknown variant and the bundle is rejected -- a weakening is
+/// not merely refused at validation time, it is inexpressible in the type the
+/// deserializer targets.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Restriction {
     Ask,
     Deny,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OperationEffect {
     Read,
     Create,
@@ -125,7 +228,8 @@ pub enum OperationEffect {
     UnknownMutation,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EnvironmentClass {
     Local,
     Development,
@@ -136,7 +240,8 @@ pub enum EnvironmentClass {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Reversibility {
     Reversible,
     Recoverable,
@@ -145,7 +250,8 @@ pub enum Reversibility {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BlastRadius {
     Single,
     Bounded,
@@ -223,7 +329,173 @@ fn is_lower_identifier_segment(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContractError, Identifier, NamespacedName, Version};
+    use super::{
+        BlastRadius, ContractError, EnvironmentClass, ExternalPolicyLayer, Identifier,
+        NamespacedName, OperationEffect, Restriction, Reversibility, Version,
+    };
+
+    /// The normative v1 policy-bundle contract.
+    fn bundle_schema() -> serde_json::Value {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../policy/schemas/v1/policy-bundle.schema.json"
+        );
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) => unreachable!("the v1 bundle schema must be readable: {error}"),
+        };
+        match serde_json::from_str(&text) {
+            Ok(value) => value,
+            Err(error) => unreachable!("the v1 bundle schema must be valid JSON: {error}"),
+        }
+    }
+
+    /// Reads an `enum` array out of the schema by JSON pointer.
+    fn schema_enum(pointer: &str) -> Vec<String> {
+        let schema = bundle_schema();
+        let node = match schema.pointer(pointer) {
+            Some(node) => node,
+            None => unreachable!("schema pointer must resolve: {pointer}"),
+        };
+        let values = match node.as_array() {
+            Some(values) => values,
+            None => unreachable!("schema enum must be an array: {pointer}"),
+        };
+        values
+            .iter()
+            .map(|value| match value.as_str() {
+                Some(text) => text.to_owned(),
+                None => unreachable!("schema enum values must be strings: {pointer}"),
+            })
+            .collect()
+    }
+
+    fn wire<T: serde::Serialize>(values: &[T]) -> Vec<String> {
+        values
+            .iter()
+            .map(|value| match serde_json::to_value(value) {
+                Ok(serde_json::Value::String(text)) => text,
+                other => unreachable!("enum must serialize to a string, got {other:?}"),
+            })
+            .collect()
+    }
+
+    /// The schema is the contract; the Rust vocabulary must match it exactly.
+    ///
+    /// Compared as sets in both directions, so this fails on a Rust variant the
+    /// schema does not admit *and* on a schema value Rust cannot express. A
+    /// rename that drifted one side would otherwise surface as a policy rule
+    /// that silently stops matching what it used to match, which is a
+    /// restriction disappearing.
+    #[test]
+    fn enum_wire_spellings_match_the_v1_schema() {
+        let cases: [(&str, Vec<String>); 5] = [
+            (
+                "/properties/rules/items/properties/effect/enum",
+                wire(&[Restriction::Ask, Restriction::Deny]),
+            ),
+            (
+                "/properties/layer/enum",
+                wire(&[
+                    ExternalPolicyLayer::Organization,
+                    ExternalPolicyLayer::User,
+                    ExternalPolicyLayer::Repository,
+                ]),
+            ),
+            (
+                "/properties/rules/items/properties/selectors/properties/operation_effects/items/enum",
+                wire(&[
+                    OperationEffect::Read,
+                    OperationEffect::Create,
+                    OperationEffect::Update,
+                    OperationEffect::Delete,
+                    OperationEffect::Move,
+                    OperationEffect::Execute,
+                    OperationEffect::PermissionChange,
+                    OperationEffect::Publish,
+                    OperationEffect::UnknownMutation,
+                ]),
+            ),
+            (
+                "/properties/rules/items/properties/selectors/properties/reversibility/items/enum",
+                wire(&[
+                    Reversibility::Reversible,
+                    Reversibility::Recoverable,
+                    Reversibility::ConditionallyRecoverable,
+                    Reversibility::Irreversible,
+                    Reversibility::Unknown,
+                ]),
+            ),
+            (
+                "/properties/rules/items/properties/selectors/properties/blast_radius/items/enum",
+                wire(&[
+                    BlastRadius::Single,
+                    BlastRadius::Bounded,
+                    BlastRadius::Broad,
+                    BlastRadius::Unbounded,
+                    BlastRadius::Unknown,
+                ]),
+            ),
+        ];
+
+        for (pointer, rust) in cases {
+            let mut schema = schema_enum(pointer);
+            let mut rust = rust;
+            schema.sort();
+            rust.sort();
+            assert_eq!(schema, rust, "vocabulary drift at {pointer}");
+        }
+
+        // The environment vocabulary appears in two places and both must agree.
+        let mut environments = wire(&[
+            EnvironmentClass::Local,
+            EnvironmentClass::Development,
+            EnvironmentClass::Test,
+            EnvironmentClass::Staging,
+            EnvironmentClass::Production,
+            EnvironmentClass::Shared,
+            EnvironmentClass::Unknown,
+        ]);
+        environments.sort();
+        for pointer in [
+            "/properties/scope/properties/environments/items/enum",
+            "/properties/rules/items/properties/selectors/properties/environments/items/enum",
+        ] {
+            let mut schema = schema_enum(pointer);
+            schema.sort();
+            assert_eq!(schema, environments, "vocabulary drift at {pointer}");
+        }
+    }
+
+    /// A supplied bundle cannot weaken, and cannot claim to be the baseline.
+    ///
+    /// Both are unknown-variant rejections rather than validation rules: the
+    /// types the deserializer targets cannot represent either value, so there
+    /// is no code path that accepts one and then decides what to do with it.
+    #[test]
+    fn a_supplied_bundle_cannot_express_allow_or_the_builtin_layer() {
+        assert!(serde_json::from_str::<Restriction>("\"allow\"").is_err());
+        assert!(serde_json::from_str::<ExternalPolicyLayer>("\"builtin\"").is_err());
+        // The values it may express still work.
+        assert_eq!(
+            match serde_json::from_str::<Restriction>("\"deny\"") {
+                Ok(value) => value,
+                Err(error) => unreachable!("deny must parse: {error}"),
+            },
+            Restriction::Deny
+        );
+    }
+
+    /// Deserialization uses the validating constructor, not a bypass.
+    #[test]
+    fn deserialization_cannot_produce_an_unvalidated_primitive() {
+        assert!(serde_json::from_str::<Identifier>("\"has space\"").is_err());
+        assert!(serde_json::from_str::<Identifier>("\"\"").is_err());
+        assert!(serde_json::from_str::<NamespacedName>("\"Git.status\"").is_err());
+        assert!(serde_json::from_str::<NamespacedName>("\"nonamespace\"").is_err());
+        assert!(serde_json::from_str::<Version>("\"latest\"").is_err());
+        assert!(serde_json::from_str::<Identifier>("\"ok.value\"").is_ok());
+    }
 
     #[test]
     fn identifier_rejects_whitespace() {

@@ -1,5 +1,9 @@
 #![forbid(unsafe_code)]
 
+mod bundle;
+
+pub use bundle::{BundleError, MAX_BUNDLE_BYTES, SUPPORTED_SCHEMA_VERSION, parse_bundle};
+
 use std::collections::BTreeSet;
 
 use ofw_contracts::{
@@ -80,6 +84,15 @@ impl Selectors {
             operation_kinds: BTreeSet::from([operation_kind]),
             ..Self::default()
         }
+    }
+
+    #[must_use]
+    pub fn with_operation_kinds(
+        mut self,
+        operation_kinds: impl IntoIterator<Item = NamespacedName>,
+    ) -> Self {
+        self.operation_kinds.extend(operation_kinds);
+        self
     }
 
     #[must_use]

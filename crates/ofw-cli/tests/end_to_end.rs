@@ -23,6 +23,43 @@ const EXIT_USAGE: i32 = 64;
 const WORKING_DIRECTORY_VARIABLE: &str = "OFW_WORKING_DIRECTORY";
 const REPOSITORY_BOUNDARY_VARIABLE: &str = "OFW_REPOSITORY_BOUNDARY";
 const ENVIRONMENT_VARIABLE: &str = "OFW_ENVIRONMENT";
+const POLICY_DIRECTORY_VARIABLE: &str = "OFW_POLICY_DIRECTORY";
+
+/// Writes one bundle file into a fresh policy directory and returns the
+/// environment entry pointing at it.
+fn policy_directory(label: &str, file_name: &str, contents: &str) -> (&'static str, String) {
+    let directory = directory(&format!("policy-{label}"));
+    let path = directory.join(file_name);
+    match std::fs::write(&path, contents) {
+        Ok(()) => {}
+        Err(error) => unreachable!("test bundle must be writable: {error}"),
+    }
+    (POLICY_DIRECTORY_VARIABLE, text(&directory))
+}
+
+/// A supplied organization bundle denying the operation the tests interpret.
+fn deny_git_status_bundle() -> String {
+    r#"{
+  "schema_version": "1.0",
+  "bundle_id": "org.baseline",
+  "bundle_version": "1.0.0",
+  "layer": "organization",
+  "issued_at": "2026-08-07T00:00:00Z",
+  "authority": { "issuer_id": "org.security", "key_id": null },
+  "scope": { "tenant_ids": [], "environments": ["local"], "repository_ids": [] },
+  "rules": [
+    {
+      "rule_id": "deny-status",
+      "effect": "deny",
+      "selectors": { "operation_kinds": ["git.status"] },
+      "risk_categories": ["git.repository"],
+      "rationale": "Status is denied by organization policy in this test.",
+      "safer_alternatives": []
+    }
+  ]
+}"#
+    .to_owned()
+}
 
 fn envelope(tool_name: &str, command: &str) -> String {
     format!(
@@ -96,6 +133,7 @@ fn run_with(arguments: &[&str], input: &[u8], environment: &[(&'static str, Stri
         .env_remove(WORKING_DIRECTORY_VARIABLE)
         .env_remove(REPOSITORY_BOUNDARY_VARIABLE)
         .env_remove(ENVIRONMENT_VARIABLE)
+        .env_remove(POLICY_DIRECTORY_VARIABLE)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -468,6 +506,123 @@ fn an_unresolvable_configuration_denies_and_doctor_does_not_claim_it_works() {
         "doctor must not claim provable kinds against a boundary that does not \
          resolve, got: {doctor}"
     );
+}
+
+/// A supplied policy rule reaching a decision, end to end from a file on disk.
+///
+/// The same command that asks with no supplied policy is denied once an
+/// organization bundle says so, and the reason names policy rather than the
+/// built-in baseline -- those lead an operator to read different documents.
+#[test]
+fn a_supplied_deny_rule_changes_the_decision() {
+    let mut configured = contained();
+    let command = envelope("Bash", "git status");
+
+    let without = stdout(&run_with(&["assess"], command.as_bytes(), &configured));
+    assert!(without.contains("\"outcome\":\"ask\""), "got: {without}");
+
+    configured.push(policy_directory(
+        "deny",
+        "organization.json",
+        &deny_git_status_bundle(),
+    ));
+    let with = stdout(&run_with(&["assess"], command.as_bytes(), &configured));
+    assert!(with.contains("\"outcome\":\"deny\""), "got: {with}");
+    assert!(with.contains("\"policy_outcome\":\"deny\""));
+    assert!(with.contains("\"reason_code\":\"POLICY_DENIED\""));
+    // Still proven: it was denied on the strength of a rule that matched, not
+    // for want of understanding the operation.
+    assert!(with.contains("\"supported_operation_proof\":true"));
+
+    // And the hook denies with that reason.
+    let hooked = run_with(
+        &["hook", "codex-pre-tool-use"],
+        command.as_bytes(),
+        &configured,
+    );
+    assert_eq!(code(&hooked), EXIT_DENY);
+    assert!(hooked.stdout.is_empty());
+    assert!(stderr(&hooked).contains("POLICY_DENIED"));
+}
+
+/// A configured policy that will not load is unhealthy, not unrestricted.
+///
+/// The end-to-end form of the invariant `ofw-cli/src/policy.rs` exists for. An
+/// operator who broke their bundle must not silently receive the behaviour of
+/// having configured no policy at all.
+#[test]
+fn an_unloadable_policy_denies_rather_than_running_unrestricted() {
+    let cases = [
+        // Valid JSON, invalid bundle: a rule effect the contract forbids.
+        (
+            "allow-effect",
+            deny_git_status_bundle().replace(r#""effect": "deny""#, r#""effect": "allow""#),
+            "POLICY_BUNDLE_INVALID",
+        ),
+        // Not JSON at all.
+        ("truncated", "{".to_owned(), "POLICY_BUNDLE_INVALID"),
+    ];
+
+    for (label, contents, expected) in cases {
+        let mut configured = contained();
+        configured.push(policy_directory(label, "organization.json", &contents));
+
+        let payload = stdout(&run_with(
+            &["assess"],
+            envelope("Bash", "git status").as_bytes(),
+            &configured,
+        ));
+        assert!(
+            payload.contains(&format!("\"reason_code\":\"{expected}\"")),
+            "{label} must report {expected}, got: {payload}"
+        );
+        assert!(payload.contains("\"outcome\":\"indeterminate\""));
+        assert!(payload.contains("\"policy_outcome\":\"unhealthy\""));
+        // Never the unrestricted behaviour of an unconfigured deployment.
+        assert!(!payload.contains("\"policy_outcome\":\"no_restriction\""));
+
+        let hooked = run_with(
+            &["hook", "codex-pre-tool-use"],
+            envelope("Bash", "git status").as_bytes(),
+            &configured,
+        );
+        assert_eq!(code(&hooked), EXIT_DENY, "{label} must deny");
+        assert!(hooked.stdout.is_empty());
+
+        // Doctor must not report a broken policy as a working one.
+        let doctor = stdout(&run_with(&["doctor"], b"", &configured));
+        assert!(doctor.contains("\"healthy\":false"), "{label}: {doctor}");
+        assert!(doctor.contains("\"provable_operation_kinds\":0"));
+    }
+}
+
+/// A configured policy location that does not exist is unhealthy.
+#[test]
+fn a_missing_policy_location_is_unhealthy() {
+    let mut configured = contained();
+    let mut absent = directory("policy-absent");
+    absent.push("no-such-directory");
+    configured.push((POLICY_DIRECTORY_VARIABLE, text(&absent)));
+
+    let payload = stdout(&run_with(
+        &["assess"],
+        envelope("Bash", "git status").as_bytes(),
+        &configured,
+    ));
+    assert!(
+        payload.contains("\"reason_code\":\"POLICY_LOCATION_UNREADABLE\""),
+        "got: {payload}"
+    );
+    assert!(payload.contains("\"outcome\":\"indeterminate\""));
+}
+
+/// Configuring no policy location is healthy, and stays healthy.
+#[test]
+fn no_configured_policy_is_healthy_rather_than_unhealthy() {
+    let doctor = stdout(&run_with(&["doctor"], b"", &contained()));
+    assert!(doctor.contains("\"healthy\":true"), "got: {doctor}");
+    assert!(doctor.contains("\"loaded_bundles\":0"));
+    assert!(doctor.contains("\"provable_operation_kinds\":2"));
 }
 
 #[test]

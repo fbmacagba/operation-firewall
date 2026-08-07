@@ -8,5 +8,15 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+# Reviewed in docs/decisions/0004-vetted-serialization-and-digest-dependencies.md
+# before this file was modified. `derive` only: `rc` and `unstable` stay off.
+serde = { version = "1.0.229", features = ["derive"] }
+
+[dev-dependencies]
+# Test-only: reads the normative schemas so a wire-vocabulary drift fails the
+# build rather than being discovered by a rule that quietly stops matching.
+serde_json = "1.0.151"
+
 [lints]
 workspace = true

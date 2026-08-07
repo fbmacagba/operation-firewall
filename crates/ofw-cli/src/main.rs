@@ -22,6 +22,7 @@
 
 mod json;
 mod pipeline;
+mod policy;
 
 use std::io::{Read, Write};
 use std::panic;
@@ -33,6 +34,8 @@ use std::time::Duration;
 use ofw_adapter_codex::MAX_ENVELOPE_BYTES;
 use ofw_core::DecisionOutcome;
 use ofw_resolve::TrustedConfiguration;
+
+use policy::PolicyActivation;
 
 use pipeline::{
     Assessment, DEADLINE_EXCEEDED, INPUT_READ_FAILED, INTERNAL_FAILURE, Reason, USAGE_INVALID,
@@ -47,6 +50,12 @@ use pipeline::{
 const WORKING_DIRECTORY_VARIABLE: &str = "OFW_WORKING_DIRECTORY";
 const REPOSITORY_BOUNDARY_VARIABLE: &str = "OFW_REPOSITORY_BOUNDARY";
 const ENVIRONMENT_VARIABLE: &str = "OFW_ENVIRONMENT";
+
+/// Optional. A deployment that configures no supplied policy is healthy and
+/// runs on the built-in baseline alone -- policy is restriction-only, so its
+/// absence changes nothing. A deployment that configures one and cannot load
+/// it is unhealthy and denies.
+const POLICY_DIRECTORY_VARIABLE: &str = "OFW_POLICY_DIRECTORY";
 
 const EXIT_OK: i32 = 0;
 const EXIT_DENY: i32 = 2;
@@ -118,8 +127,17 @@ fn run_hook(rest: &[&str]) {
 
     let assessment = match panic::catch_unwind(|| {
         let configuration = trusted_configuration();
+        let policy = policy_activation();
         let input = read_bounded_stdin();
-        input.map(|bytes| pipeline::assess(&bytes, configuration.as_ref()))
+        input.map(|bytes| {
+            pipeline::assess(
+                &bytes,
+                &pipeline::AssessmentContext {
+                    configuration: configuration.as_ref(),
+                    policy: &policy,
+                },
+            )
+        })
     }) {
         Ok(Ok(assessment)) => assessment,
         Ok(Err(reason)) => deny(reason),
@@ -232,9 +250,25 @@ fn trusted_configuration() -> Option<TrustedConfiguration> {
     .ok()
 }
 
+/// Activates supplied policy from the configured location, if there is one.
+fn policy_activation() -> PolicyActivation {
+    match std::env::var_os(POLICY_DIRECTORY_VARIABLE) {
+        Some(directory) => policy::activate_from_directory(&PathBuf::from(directory)),
+        None => PolicyActivation::none_configured(),
+    }
+}
+
 fn run_assess() {
+    let configuration = trusted_configuration();
+    let activation = policy_activation();
     let assessment = match read_bounded_stdin() {
-        Ok(input) => pipeline::assess(&input, trusted_configuration().as_ref()),
+        Ok(input) => pipeline::assess(
+            &input,
+            &pipeline::AssessmentContext {
+                configuration: configuration.as_ref(),
+                policy: &activation,
+            },
+        ),
         Err(reason) => Assessment {
             outcome: DecisionOutcome::Indeterminate,
             reason,
@@ -289,9 +323,28 @@ fn run_doctor() {
         .string("codex_envelope_parsing", "implemented")
         .string("intent_interpretation", "read_only_git_subset")
         .string("target_resolution", "repository_scope_only")
-        .string("policy_bundle_loading", "not_implemented")
+        .string("policy_bundle_loading", "implemented")
         .string("audit", "not_implemented")
         .string("approval_capabilities", "not_implemented");
+
+    let activation = policy_activation();
+    let mut policy_report = json::Object::new();
+    policy_report
+        .boolean(
+            "configured",
+            std::env::var_os(POLICY_DIRECTORY_VARIABLE).is_some(),
+        )
+        .boolean("healthy", activation.is_healthy())
+        .integer(
+            "loaded_bundles",
+            u64::try_from(activation.bundle_count()).unwrap_or(0),
+        )
+        .string("required_variable", POLICY_DIRECTORY_VARIABLE)
+        .string(
+            "scope_filtering",
+            "not_implemented; every supplied bundle applies, which is \
+             over-restrictive rather than under-restrictive",
+        );
 
     // Reported as configured or not, never as its contents: the paths are
     // local filesystem layout and the diagnostics output is copied into bug
@@ -332,10 +385,18 @@ fn run_doctor() {
         .object("adapter", adapter)
         .object("components", implemented)
         .object("trusted_configuration", configuration)
+        .object("policy", policy_report)
         // Provable only when the configuration is present *and* its paths
         // actually resolve. Counting on presence alone would report a typo as
         // two provable kinds while every assessment came out indeterminate.
-        .integer("provable_operation_kinds", if resolvable { 2 } else { 0 })
+        .integer(
+            "provable_operation_kinds",
+            if resolvable && activation.is_healthy() {
+                2
+            } else {
+                0
+            },
+        )
         .strings("provable_operations", &["git.status", "git.rev_parse"])
         .string("enforcement", "not_active")
         .string("hook_registration", "unconfirmed")

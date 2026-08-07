@@ -28,8 +28,10 @@ use ofw_core::{
     DecisionOutcome, OperationEvidence, SupportedOperationProof, decide, evidence_from_intent,
 };
 use ofw_intent::Classification;
-use ofw_policy::{EffectivePolicy, Fact, OperationFacts, PolicyEvaluation};
+use ofw_policy::{EffectivePolicy, Fact, OperationFacts, PolicyEvaluation, PolicyOutcome};
 use ofw_resolve::{ResolutionError, TrustedConfiguration};
+
+use crate::policy::PolicyActivation;
 
 /// A stable, payload-free explanation code.
 ///
@@ -109,16 +111,49 @@ const BASELINE_DENIED: Reason = Reason {
     code: "BASELINE_DENIED",
     message: "operation was proven and the built-in safety baseline denies it",
 };
+/// Denied because a supplied rule said so, rather than by the baseline.
+///
+/// Attribution matters to whoever has to act on it: "the built-in baseline
+/// denies this" and "your organisation's policy denies this" lead to different
+/// next steps, and reporting the first for the second sends an operator to
+/// read the wrong document.
+const POLICY_DENIED: Reason = Reason {
+    code: "POLICY_DENIED",
+    message: "operation was proven and a supplied policy rule denies it",
+};
 const OPERATION_PROVEN: Reason = Reason {
     code: "OPERATION_PROVEN",
     message: "operation was proven and no restriction applies",
 };
-/// A proof exists and policy could not be resolved. Unreachable while no
-/// policy bundle loader exists; kept because it is the outcome a rule
-/// selecting on a fact nobody established must produce.
+/// A proof exists and policy could not be resolved -- a loaded rule selected
+/// on a fact nobody established.
 const POLICY_INDETERMINATE: Reason = Reason {
     code: "POLICY_INDETERMINATE",
     message: "policy evaluation needed a fact that was not established",
+};
+
+/// Supplied policy was configured and could not be activated.
+///
+/// These are not decisions. A configured policy that does not load leaves the
+/// system unable to say what is restricted, and that is `indeterminate` -- not
+/// the unrestricted behaviour of a deployment that configured no policy.
+pub const POLICY_ACTIVATION_UNHEALTHY: Reason = Reason {
+    code: "POLICY_ACTIVATION_UNHEALTHY",
+    message: "configured policy could not be activated, so no decision can be \
+              made",
+};
+pub const POLICY_LOCATION_UNREADABLE: Reason = Reason {
+    code: "POLICY_LOCATION_UNREADABLE",
+    message: "configured policy location could not be read",
+};
+pub const POLICY_BUNDLE_INVALID: Reason = Reason {
+    code: "POLICY_BUNDLE_INVALID",
+    message: "a configured policy bundle did not match the v1 contract",
+};
+pub const POLICY_TOO_MANY_BUNDLES: Reason = Reason {
+    code: "POLICY_TOO_MANY_BUNDLES",
+    message: "configured policy location holds more bundles than the compiled \
+              maximum",
 };
 
 pub const INPUT_READ_FAILED: Reason = Reason {
@@ -165,18 +200,42 @@ enum Stage {
     },
 }
 
-/// Assesses one Codex `PreToolUse` envelope.
+/// Everything a decision depends on besides the envelope itself.
 ///
-/// The configuration is a parameter rather than something this function reads,
-/// so that no caller can be given a decision that silently depends on ambient
-/// process state. `None` means none was configured, and an operation that
-/// cannot be placed cannot be proven.
+/// Passed in rather than read here, so that no caller can be given a decision
+/// that silently depends on ambient process state.
+pub struct AssessmentContext<'a> {
+    /// `None` means none was configured. An operation that cannot be placed
+    /// cannot be proven.
+    pub configuration: Option<&'a TrustedConfiguration>,
+    pub policy: &'a PolicyActivation,
+}
+
+/// Assesses one Codex `PreToolUse` envelope.
 #[must_use]
-pub fn assess(input: &[u8], configuration: Option<&TrustedConfiguration>) -> Assessment {
+pub fn assess(input: &[u8], context: &AssessmentContext<'_>) -> Assessment {
+    // System health is checked before anything is interpreted. A firewall that
+    // cannot tell what is restricted has no business deciding, and reporting
+    // the health fault first is what tells an operator the actionable thing
+    // rather than a downstream symptom of it.
+    let policy = match context.policy {
+        PolicyActivation::Unhealthy(reason) => {
+            return Assessment {
+                outcome: DecisionOutcome::Indeterminate,
+                reason: *reason,
+                tool_name: None,
+                operation_kind: None,
+                proof_present: false,
+                policy_outcome: "unhealthy",
+            };
+        }
+        PolicyActivation::Healthy { policy, .. } => policy,
+    };
+
     let extracted = match assess_supported_pre_tool_use(input) {
         AdapterAssessment::Extracted(extracted) => extracted,
         AdapterAssessment::Indeterminate(error) => {
-            return blocked(adapter_reason(&error), None, None);
+            return blocked(policy, adapter_reason(&error), None, None);
         }
     };
 
@@ -195,7 +254,9 @@ pub fn assess(input: &[u8], configuration: Option<&TrustedConfiguration>) -> Ass
     // measured against. `red_first_witness_detects_trusting_the_envelope_cwd`
     // retains a pipeline that does read it.
     let stage = match extracted.tool_input() {
-        ExtractedToolInput::Bash(bash) => interpret_and_resolve(bash.command(), configuration),
+        ExtractedToolInput::Bash(bash) => {
+            interpret_and_resolve(bash.command(), context.configuration)
+        }
         // The apply-patch grammar is a separate slice.
         ExtractedToolInput::ApplyPatch(_) => Stage::Blocked {
             reason: INTERPRETATION_UNSUPPORTED,
@@ -207,16 +268,16 @@ pub fn assess(input: &[u8], configuration: Option<&TrustedConfiguration>) -> Ass
         Stage::Blocked {
             reason,
             operation_kind,
-        } => blocked(reason, tool_name, operation_kind),
+        } => blocked(policy, reason, tool_name, operation_kind),
         Stage::Proven {
             operation_kind,
             proof,
         } => {
-            let evaluation = policy_evaluation(Some(proof.evidence()));
+            let evaluation = evaluate(policy, Some(proof.evidence()));
             let outcome = decide(Some(&proof), &evaluation);
             Assessment {
                 outcome,
-                reason: decided_reason(outcome),
+                reason: decided_reason(outcome, evaluation.outcome),
                 tool_name,
                 operation_kind: Some(operation_kind),
                 proof_present: true,
@@ -296,21 +357,32 @@ const fn resolution_reason(error: ResolutionError) -> Reason {
 }
 
 /// The reason attached to a decision that was actually reached.
-const fn decided_reason(outcome: DecisionOutcome) -> Reason {
+///
+/// A deny is attributed to whichever layer produced it. The join takes the
+/// most restrictive of the two, so a policy deny is the cause exactly when
+/// policy said deny -- and when both did, naming policy is still correct,
+/// because removing the policy rule would not lift the decision either way.
+const fn decided_reason(outcome: DecisionOutcome, policy: PolicyOutcome) -> Reason {
     match outcome {
         DecisionOutcome::Allow => OPERATION_PROVEN,
         DecisionOutcome::Ask => APPROVAL_REQUIRED,
-        DecisionOutcome::Deny => BASELINE_DENIED,
+        DecisionOutcome::Deny => match policy {
+            PolicyOutcome::Deny => POLICY_DENIED,
+            PolicyOutcome::NoRestriction | PolicyOutcome::Ask | PolicyOutcome::Indeterminate => {
+                BASELINE_DENIED
+            }
+        },
         DecisionOutcome::Indeterminate => POLICY_INDETERMINATE,
     }
 }
 
 fn blocked(
+    policy: &EffectivePolicy,
     reason: Reason,
     tool_name: Option<&'static str>,
     operation_kind: Option<&'static str>,
 ) -> Assessment {
-    let evaluation = policy_evaluation(None);
+    let evaluation = evaluate(policy, None);
     Assessment {
         // No proof, so `decide` is `Indeterminate` whatever policy said. Going
         // through `decide` rather than writing the variant here keeps the one
@@ -324,23 +396,14 @@ fn blocked(
     }
 }
 
-/// Evaluates the effective policy against what is actually established.
+/// Evaluates the activated policy against what is actually established.
 ///
-/// No policy bundle loader exists yet, so the effective policy is empty and
-/// restricts nothing. The facts still matter: they are what a loaded rule
-/// would select on, and they are built from resolver-established evidence
-/// rather than from the command. An operation with no proof supplies no facts
-/// at all -- an unresolved operation has not established anything, and a rule
-/// that needed one of those facts must come out indeterminate rather than
-/// quietly not matching.
-fn policy_evaluation(evidence: Option<&OperationEvidence>) -> PolicyEvaluation {
-    let effective = match EffectivePolicy::compose(Vec::new()) {
-        Ok(effective) => effective,
-        // Composing zero bundles cannot fail; treat any future change that
-        // makes it fallible as indeterminate rather than a panic.
-        Err(_) => return indeterminate_evaluation(),
-    };
-
+/// The facts are built from resolver-established evidence rather than from the
+/// command. An operation with no proof supplies no facts at all -- an
+/// unresolved operation has not established anything, and a rule that needed
+/// one of those facts must come out indeterminate rather than quietly not
+/// matching.
+fn evaluate(effective: &EffectivePolicy, evidence: Option<&OperationEvidence>) -> PolicyEvaluation {
     let facts = match evidence {
         None => OperationFacts::new(
             Fact::Unknown,
@@ -425,9 +488,9 @@ mod tests {
     use ofw_resolve::TrustedConfiguration;
 
     use super::{
-        APPROVAL_REQUIRED, Assessment, BASELINE_DENIED, COMMAND_NOT_LITERAL,
-        INTERPRETATION_UNSUPPORTED, TOOL_UNSUPPORTED, TRUSTED_CONFIGURATION_MISSING, assess,
-        outcome_name, policy_evaluation,
+        APPROVAL_REQUIRED, Assessment, AssessmentContext, BASELINE_DENIED, COMMAND_NOT_LITERAL,
+        INTERPRETATION_UNSUPPORTED, POLICY_BUNDLE_INVALID, PolicyActivation, TOOL_UNSUPPORTED,
+        TRUSTED_CONFIGURATION_MISSING, assess, outcome_name,
     };
 
     fn directory(label: &str) -> PathBuf {
@@ -468,8 +531,28 @@ mod tests {
         envelope(command, "c")
     }
 
+    /// A healthy activation with no supplied policy: restricts nothing, which
+    /// is what "no external policy configured" must mean.
+    fn healthy_policy() -> PolicyActivation {
+        PolicyActivation::none_configured()
+    }
+
     fn assess_str(input: &str, configuration: Option<&TrustedConfiguration>) -> Assessment {
-        assess(input.as_bytes(), configuration)
+        assess_with(input, configuration, &healthy_policy())
+    }
+
+    fn assess_with(
+        input: &str,
+        configuration: Option<&TrustedConfiguration>,
+        policy: &PolicyActivation,
+    ) -> Assessment {
+        assess(
+            input.as_bytes(),
+            &AssessmentContext {
+                configuration,
+                policy,
+            },
+        )
     }
 
     #[test]
@@ -528,10 +611,44 @@ mod tests {
             assert_eq!(assessment.policy_outcome, "no_restriction");
             assert_ne!(assessment.outcome, DecisionOutcome::Allow);
         }
-        assert_eq!(
-            policy_evaluation(None).outcome,
-            ofw_policy::PolicyOutcome::NoRestriction
-        );
+    }
+
+    /// A configured policy that cannot be activated is not an unrestricted
+    /// one.
+    ///
+    /// The operation here is fully provable -- interpretation and resolution
+    /// both succeed -- so the only thing standing between it and a decision is
+    /// that the firewall cannot say what is restricted.
+    #[test]
+    fn red_first_witness_detects_unloadable_policy_treated_as_empty() {
+        let unhealthy = PolicyActivation::Unhealthy(POLICY_BUNDLE_INVALID);
+        let configured = contained();
+
+        let real = assess_with(&bash("git status"), Some(&configured), &unhealthy);
+        assert_eq!(real.outcome, DecisionOutcome::Indeterminate);
+        assert_eq!(real.reason, POLICY_BUNDLE_INVALID);
+        assert_eq!(real.policy_outcome, "unhealthy");
+
+        // The retained witness substitutes the empty policy for the one that
+        // would not load. The operation becomes an ordinary approvable ask,
+        // and any deny the bundle carried is simply not applied.
+        let vulnerable = vulnerable_unloadable_policy_is_empty(&bash("git status"), &configured);
+        assert_eq!(vulnerable.outcome, DecisionOutcome::Ask);
+        assert_eq!(vulnerable.policy_outcome, "no_restriction");
+    }
+
+    /// Retained red-first witness: a failed policy activation falling back to
+    /// "no policy".
+    fn vulnerable_unloadable_policy_is_empty(
+        input: &str,
+        configuration: &TrustedConfiguration,
+    ) -> Assessment {
+        let unhealthy = PolicyActivation::Unhealthy(POLICY_BUNDLE_INVALID);
+        let substituted = match unhealthy {
+            PolicyActivation::Unhealthy(_) => healthy_policy(),
+            healthy @ PolicyActivation::Healthy { .. } => healthy,
+        };
+        assess_with(input, Some(configuration), &substituted)
     }
 
     /// The agent's claim about where its command runs is not read.
