@@ -662,6 +662,101 @@ mod tests {
         );
     }
 
+    /// A `PolicyEvaluation` at an arbitrary outcome, with no rules behind it.
+    ///
+    /// Built by hand rather than by composing a bundle, because the point is
+    /// to cover the outcome space exhaustively rather than to reach each
+    /// outcome the way production does -- including outcomes no bundle in this
+    /// milestone can currently produce.
+    fn evaluation_at(outcome: PolicyOutcome) -> PolicyEvaluation {
+        PolicyEvaluation {
+            outcome,
+            determining_rules: Vec::new(),
+            indeterminate_rules: Vec::new(),
+            missing_facts: BTreeSet::new(),
+        }
+    }
+
+    /// The whole decision space, stated as a table.
+    ///
+    /// The `NoRestriction` advisory -- policy silence being read as permission
+    /// -- is the failure this crate exists to prevent, and the existing
+    /// witnesses cover it one instance at a time. This covers it exhaustively:
+    /// every baseline against every policy outcome, sixteen cells, each written
+    /// out. A future change that weakens one cell cannot hide behind the cases
+    /// nobody sampled.
+    ///
+    /// The security property is the last assertion: `Allow` appears in exactly
+    /// one cell of sixteen, and only where the operation's own proof already
+    /// derived `Allow`. Policy cannot produce it, and absent policy cannot
+    /// produce it either.
+    #[test]
+    fn the_decision_table_is_exhaustive_and_allow_needs_a_proof() {
+        let ask_evidence = OperationEvidence {
+            operation_kind: name("filesystem.remove"),
+            effect: OperationEffect::Delete,
+            reversibility: Reversibility::Recoverable,
+            ..readable_evidence()
+        };
+        let deny_evidence = OperationEvidence {
+            operation_kind: name("filesystem.chmod"),
+            effect: OperationEffect::PermissionChange,
+            ..readable_evidence()
+        };
+
+        let allow = proof(readable_evidence());
+        let ask = proof(ask_evidence);
+        let deny = proof(deny_evidence);
+        assert_eq!(allow.baseline(), BaselineRestriction::Allow);
+        assert_eq!(ask.baseline(), BaselineRestriction::Ask);
+        assert_eq!(deny.baseline(), BaselineRestriction::Deny);
+
+        use DecisionOutcome as D;
+        use PolicyOutcome as P;
+        let table = [
+            // An operation whose own proof allows.
+            (Some(&allow), P::NoRestriction, D::Allow),
+            (Some(&allow), P::Ask, D::Ask),
+            (Some(&allow), P::Deny, D::Deny),
+            (Some(&allow), P::Indeterminate, D::Indeterminate),
+            // One whose proof asks: policy may raise, never lower.
+            (Some(&ask), P::NoRestriction, D::Ask),
+            (Some(&ask), P::Ask, D::Ask),
+            (Some(&ask), P::Deny, D::Deny),
+            (Some(&ask), P::Indeterminate, D::Indeterminate),
+            // One whose proof denies: nothing policy says can weaken it.
+            (Some(&deny), P::NoRestriction, D::Deny),
+            (Some(&deny), P::Ask, D::Deny),
+            (Some(&deny), P::Deny, D::Deny),
+            (Some(&deny), P::Indeterminate, D::Indeterminate),
+            // No proof at all: never anything but indeterminate, and in
+            // particular not when policy is silent.
+            (None, P::NoRestriction, D::Indeterminate),
+            (None, P::Ask, D::Indeterminate),
+            (None, P::Deny, D::Indeterminate),
+            (None, P::Indeterminate, D::Indeterminate),
+        ];
+
+        for (supplied, policy, expected) in table {
+            assert_eq!(
+                decide(supplied, &evaluation_at(policy)),
+                expected,
+                "baseline {:?} joined with policy {policy:?}",
+                supplied.map(SupportedOperationProof::baseline)
+            );
+        }
+
+        let allowed: Vec<_> = table
+            .iter()
+            .filter(|(_, _, outcome)| matches!(outcome, D::Allow))
+            .collect();
+        assert_eq!(
+            allowed.len(),
+            1,
+            "allow must be reachable from exactly one cell of the table"
+        );
+    }
+
     #[test]
     fn proof_construction_rejects_unproven_evidence() {
         let cases = [
