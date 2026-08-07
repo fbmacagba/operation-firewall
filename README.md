@@ -14,7 +14,7 @@ It evaluates typed operation intent rather than relying only on command-string d
 | Milestone | Status | Scope |
 | --- | --- | --- |
 | 0 — Foundation | Complete | Approved PRD, threat model, architecture decisions, v1 contracts, and clean-room provenance |
-| 1 — Local decision core | In progress | Implemented: typed contracts, monotonic policy evaluation, strict v1 bundle deserialization and activation, bounded Codex envelope parsing, Bash/apply_patch payload extraction, read-only Git intent interpretation, repository-scope target resolution, structurally redacted audit construction, and the `ofw` CLI. Remaining: audit persistence, path-operand resolution, per-platform resolver evidence, apply-patch and PowerShell grammars, fuzz targets, and reproducible release verification |
+| 1 — Local decision core | In progress | Implemented: typed contracts, monotonic policy evaluation, strict v1 bundle deserialization and activation, bounded Codex envelope parsing, Bash/apply_patch payload extraction, read-only Git intent interpretation, repository-scope target resolution, structurally redacted audit construction, and the `ofw` CLI. Plus fuzz targets for every untrusted parser, supply-chain gates, and rebuild-determinism checking in CI. Remaining: audit persistence, path-operand resolution, per-platform resolver evidence, apply-patch and PowerShell grammars, mutation testing, and full cross-machine reproducibility. See the [per-criterion status](docs/milestone-1/completion-status.md) |
 | 2 — Approval and Codex integration | Not started | Bound approvals, replay protection, real `PreToolUse` integration, and enforcement diagnostics |
 | 3 — Broader adapters | Not started | Database, Kubernetes, cloud, IaC, and MCP adapters |
 
