@@ -161,15 +161,18 @@ fn run_hook(rest: &[&str]) {
 
 /// Emits the explicit allow object and exits 0.
 ///
-/// # Unconfirmed shape
+/// # Confirmed shape
 ///
-/// The deny object is documented; an explicit allow object is not. This shape
-/// is inferred from the deny form and has **not** been confirmed against a
-/// live Codex. If `permissionDecision: "allow"` turns out not to be a
-/// recognized value, Codex records a hook failure and the call proceeds --
-/// the same visible result, reached by the wrong mechanism, which would mask
-/// a real defect later. Confirming it belongs to the live-fixture spike the
-/// protocol research already lists as an open item.
+/// Verified 2026-08-07 against the JSON Schema embedded in codex-cli 0.146.0's
+/// own binary, which is a primary source rather than prose about one:
+/// `PreToolUseHookSpecificOutputWire` requires only `hookEventName`
+/// (`const: "PreToolUse"`), and `permissionDecision` accepts `allow`. This
+/// object matches. See `docs/research/codex-hook-protocol.md`.
+///
+/// That evidence is one version on one platform, so it dates rather than
+/// settles: `assert_the_allow_object_matches_the_confirmed_wire_shape` pins
+/// what this emits, and `INPUT_PROTOCOL_REVISION` is what moves when the host
+/// is re-verified.
 ///
 /// No `updatedInput` is ever emitted: rewriting the operation that was just
 /// evaluated is its own bypass surface.

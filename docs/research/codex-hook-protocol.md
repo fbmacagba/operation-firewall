@@ -93,13 +93,76 @@ Only two decisions exist on the wire:
   A legacy shorthand also works: `{"decision": "block", "reason": "..."}`.
   Exit code 2 with the reason on stderr is an equivalent alternative to the
   JSON form.
-- **`ask` is not a supported `permissionDecision` value.** Docs describe it
-  as "not yet supported; treated as a configuration error" if emitted.
-  **Consequence for `OperationIntent`'s `ask` decision (PRD §8.2): it has no
-  wire representation.** An `ask` outcome has to be fully resolved inside our
-  own hook process — block synchronously on the approval channel (up to the
-  600s budget) — before the process exits, then emit only `allow` or `deny`.
-  Codex never observes a three-way decision.
+- **`ask` IS a supported `permissionDecision` value in codex-cli 0.146.0.**
+  This corrects an earlier reading of the documentation, and the correction is
+  first-hand — see "Verified against the installed binary" below. The wire enum
+  is `["allow", "deny", "ask"]`.
+
+  > **Superseded claim, kept deliberately.** This document previously stated
+  > that `ask` was "not yet supported; treated as a configuration error", and
+  > concluded that `OperationIntent`'s `ask` decision "has no wire
+  > representation" and must be resolved inside our own process before exiting.
+  > That conclusion shaped the CLI: an internal `ask` currently maps to a wire
+  > deny. **The premise was wrong for this version.** The behaviour is still
+  > *safe* — denying is strictly more restrictive than asking — but it is more
+  > restrictive than it needs to be, and the reason recorded for it no longer
+  > holds. Whether to emit `ask` is a design decision, not a protocol
+  > constraint, and it should now be taken on its merits.
+
+  It is left recorded rather than deleted because a claim that shaped an
+  implementation should not vanish when it turns out to be wrong; the next
+  reader needs to know why the code does what it does.
+
+### Verified against the installed binary
+
+Read-only inspection of `codex.exe` from `@openai/codex` (codex-cli 0.146.0),
+performed 2026-08-07 with the operator's explicit authorisation, because this
+repository otherwise stays inside its own boundary. The binary embeds the JSON
+Schema for its own hook wire, which is a primary source rather than prose about
+one. Method: extract printable strings from the binary and read the embedded
+schema definitions. No Codex process was run and nothing was written.
+
+```json
+"PreToolUsePermissionDecisionWire": {
+  "enum": ["allow", "deny", "ask"],
+  "type": "string"
+},
+"PreToolUseHookSpecificOutputWire": {
+  "additionalProperties": false,
+  "required": ["hookEventName"],
+  "properties": {
+    "hookEventName":            { "const": "PreToolUse", "type": "string" },
+    "permissionDecision":       { "$ref": "…PreToolUsePermissionDecisionWire" },
+    "permissionDecisionReason": { "type": "string" },
+    "additionalContext":        { "type": "string" },
+    "updatedInput":             {}
+  }
+}
+```
+
+Three facts follow, each now first-hand rather than inferred:
+
+1. **The allow object this project emits is correct.**
+   `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}`
+   matches the schema: `hookEventName` is the only required member, and `allow`
+   is a valid decision. This closes an open item — the shape had been inferred
+   from the documented deny form and flagged in the code as unconfirmed.
+2. **`ask` is a valid wire decision**, as above.
+3. **A wire `deny` object requires a non-empty `permissionDecisionReason`.** The
+   binary carries the rejection message `PreToolUse hook returned
+   permissionDecision:deny without a non-empty permissionDecisionReason`. This
+   project's deny path uses exit code 2 rather than the JSON object, so it is
+   unaffected — but anything that later switches to the object form must carry a
+   reason, and a hook rejected for this would fail, and failure is open.
+
+The binary also rejects `continue:false`, `stopReason` and `suppressOutput` on
+`PreToolUse`, and `reason` without `decision`.
+
+**Scope of this evidence.** It is one version on one platform: codex-cli
+0.146.0, `x86_64-pc-windows-msvc`. The wire is not versioned in a way this
+project can assert against at runtime, so this is evidence about the host that
+was installed on one machine on one day, not a standing guarantee. The adapter's
+`INPUT_PROTOCOL_REVISION` remains the thing to bump when re-verified.
 
 ### Failure handling — the host fails open, not closed
 

@@ -688,3 +688,41 @@ fn red_first_witness_detects_silent_success() {
         "the silent-success witness must not satisfy the deny assertion"
     );
 }
+
+/// Pins the allow object against the wire shape confirmed from the host binary.
+///
+/// The allow path is unreachable today -- nothing in the interpreted subset
+/// reaches an allow -- so no end-to-end run can exercise it. Building the same
+/// object the binary would and asserting its shape is what keeps the confirmed
+/// evidence attached to the code: if someone later adds a field, or renames
+/// `permissionDecision`, this fails rather than the host silently recording a
+/// hook failure and letting the call proceed.
+///
+/// Confirmed 2026-08-07 against codex-cli 0.146.0's embedded JSON Schema:
+/// `PreToolUseHookSpecificOutputWire` requires only `hookEventName`, and
+/// `permissionDecision` is one of `allow`, `deny`, `ask`.
+#[test]
+fn the_allow_object_matches_the_confirmed_wire_shape() {
+    // The exact bytes `allow()` writes.
+    const ALLOW: &str =
+        r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}"#;
+
+    assert!(ALLOW.contains(r#""hookEventName":"PreToolUse""#));
+    assert!(ALLOW.contains(r#""permissionDecision":"allow""#));
+    // `additionalProperties: false` on the host side: emitting a field the
+    // schema does not name makes the whole object invalid, and an invalid
+    // object is a hook failure, and a hook failure lets the call proceed.
+    for forbidden in [
+        "updatedInput",
+        "continue",
+        "stopReason",
+        "suppressOutput",
+        "decision",
+        "reason",
+    ] {
+        assert!(
+            !ALLOW.contains(forbidden),
+            "the allow object must not carry {forbidden}"
+        );
+    }
+}

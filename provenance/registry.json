@@ -11,7 +11,12 @@
       "source_class": "public_interface_specification",
       "terms_status": "No source text redistributed; factual interoperability reference only.",
       "permitted_use": "PreToolUse envelope, supported tool-input shape, response, timeout, and host failure-mode facts.",
-      "facts_used": ["PreToolUse supports allow and deny wire outcomes", "Bash and apply_patch PreToolUse inputs use a string tool_input.command field", "Hook failure modes can allow host execution", "PostToolUse cannot prevent an already executed operation"],
+      "facts_used": [
+        "PreToolUse supports allow and deny wire outcomes",
+        "Bash and apply_patch PreToolUse inputs use a string tool_input.command field",
+        "Hook failure modes can allow host execution",
+        "PostToolUse cannot prevent an already executed operation"
+      ],
       "artifacts_influenced": [
         "docs/research/codex-hook-protocol.md",
         "docs/architecture.md",
@@ -35,8 +40,18 @@
       "source_class": "external_security_review",
       "terms_status": "Project-provided review artifact; used as review findings, not implementation source.",
       "permitted_use": "Challenge policy monotonicity, security-test evidence, concurrency, coverage, and rollout requirements.",
-      "facts_used": ["Directional deep merges can narrow list-valued restrictions", "Security tests need evidence they detect a vulnerable implementation", "Single-use approval requires atomic redemption"],
-      "artifacts_influenced": ["docs/decisions/0002-monotonic-policy-composition.md", "docs/architecture.md", "docs/threat-model.md", "docs/PRD.md", "tests/README.md"],
+      "facts_used": [
+        "Directional deep merges can narrow list-valued restrictions",
+        "Security tests need evidence they detect a vulnerable implementation",
+        "Single-use approval requires atomic redemption"
+      ],
+      "artifacts_influenced": [
+        "docs/decisions/0002-monotonic-policy-composition.md",
+        "docs/architecture.md",
+        "docs/threat-model.md",
+        "docs/PRD.md",
+        "tests/README.md"
+      ],
       "copied_material": false,
       "review_status": "reviewed",
       "reviewer": "Operation Firewall maintainers",
@@ -52,8 +67,12 @@
       "source_class": "public_interface_specification",
       "terms_status": "Normative specification reference; verify terms before redistributing specification text.",
       "permitted_use": "Define and validate Operation Firewall JSON contracts.",
-      "facts_used": ["Draft 2020-12 schema vocabulary and validation semantics"],
-      "artifacts_influenced": ["policy/schemas/v1"],
+      "facts_used": [
+        "Draft 2020-12 schema vocabulary and validation semantics"
+      ],
+      "artifacts_influenced": [
+        "policy/schemas/v1"
+      ],
       "copied_material": false,
       "review_status": "reviewed",
       "reviewer": "Operation Firewall maintainers",
@@ -69,8 +88,13 @@
       "source_class": "public_interface_specification",
       "terms_status": "Normative RFC reference; no RFC text redistributed.",
       "permitted_use": "Canonicalize digest-bearing JSON structures consistently across implementations.",
-      "facts_used": ["RFC 8785 canonical JSON representation"],
-      "artifacts_influenced": ["docs/architecture.md", "policy/schemas/v1/operation-intent.schema.json"],
+      "facts_used": [
+        "RFC 8785 canonical JSON representation"
+      ],
+      "artifacts_influenced": [
+        "docs/architecture.md",
+        "policy/schemas/v1/operation-intent.schema.json"
+      ],
       "copied_material": false,
       "review_status": "reviewed",
       "reviewer": "Operation Firewall maintainers",
@@ -86,8 +110,18 @@
       "source_class": "development_tooling",
       "terms_status": "Locally installed development tool invoked by explicit operator request.",
       "permitted_use": "Generate repository configuration, managed hook shims, baseline state, and deterministic security/quality gate results.",
-      "facts_used": ["Graphite owns the post-commit trampoline and invokes a tracked aramid-managed post-commit.local sibling", "The repository test gate explicitly runs the contract validator"],
-      "artifacts_influenced": ["aramid.toml", "ARAMID.md", ".githooks/pre-commit", ".githooks/pre-push", ".githooks/post-commit.local", ".gitignore"],
+      "facts_used": [
+        "Graphite owns the post-commit trampoline and invokes a tracked aramid-managed post-commit.local sibling",
+        "The repository test gate explicitly runs the contract validator"
+      ],
+      "artifacts_influenced": [
+        "aramid.toml",
+        "ARAMID.md",
+        ".githooks/pre-commit",
+        ".githooks/pre-push",
+        ".githooks/post-commit.local",
+        ".gitignore"
+      ],
       "copied_material": false,
       "review_status": "reviewed",
       "reviewer": "Operation Firewall maintainers",
@@ -103,12 +137,50 @@
       "source_class": "development_tooling",
       "terms_status": "Installed through the official Rustup Winget package; project source remains MIT.",
       "permitted_use": "Compile, format, lint, and test the independently designed Operation Firewall Rust workspace.",
-      "facts_used": ["Rust 2024 edition", "Cargo workspace", "rustfmt and Clippy components"],
-      "artifacts_influenced": ["rust-toolchain.toml", "Cargo.toml", "Cargo.lock", "crates/ofw-contracts", "crates/ofw-policy", "scripts/verify.py"],
+      "facts_used": [
+        "Rust 2024 edition",
+        "Cargo workspace",
+        "rustfmt and Clippy components"
+      ],
+      "artifacts_influenced": [
+        "rust-toolchain.toml",
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/ofw-contracts",
+        "crates/ofw-policy",
+        "scripts/verify.py"
+      ],
       "copied_material": false,
       "review_status": "reviewed",
       "reviewer": "Operation Firewall maintainers",
       "notes": "Implementation was derived from Operation Firewall's approved contracts and ADRs, not from the prohibited comparison project or aramid internals."
+    },
+    {
+      "entry_id": "source.codex-cli-0.146.0-embedded-hook-schema",
+      "recorded_at": "2026-08-07",
+      "source_title": "Codex CLI embedded PreToolUse hook wire schema",
+      "source_owner": "OpenAI",
+      "source_locator": "npm:@openai/codex@0.146.0 (codex-win32-x64 vendor binary, embedded JSON Schema)",
+      "accessed_at": "2026-08-07",
+      "source_class": "public_interface_specification",
+      "terms_status": "Read-only inspection of a locally installed public package, performed with the operator's explicit authorisation. No source text redistributed beyond the interoperability facts below; no Codex code inspected, decompiled, or adapted; no Codex process run.",
+      "permitted_use": "Confirm the exact PreToolUse hook wire contract this project must interoperate with.",
+      "facts_used": [
+        "PreToolUsePermissionDecisionWire is the enum [allow, deny, ask]",
+        "PreToolUseHookSpecificOutputWire requires only hookEventName, which is const PreToolUse",
+        "permissionDecisionReason must be non-empty when permissionDecision is deny",
+        "continue:false, stopReason and suppressOutput are unsupported on PreToolUse",
+        "additionalProperties is false on PreToolUseHookSpecificOutputWire"
+      ],
+      "artifacts_influenced": [
+        "docs/research/codex-hook-protocol.md",
+        "crates/ofw-cli/src/main.rs",
+        "crates/ofw-cli/tests/end_to_end.rs"
+      ],
+      "copied_material": false,
+      "review_status": "reviewed",
+      "reviewer": "Operation Firewall maintainers",
+      "notes": "Corrects a prior claim in this project's own research that `ask` had no wire representation; the superseded claim is retained in the research document rather than deleted, because it shaped the CLI's current ask-denies behaviour. Evidence is one version on one platform (0.146.0, x86_64-pc-windows-msvc) and dates rather than settles."
     }
   ]
 }
