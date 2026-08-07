@@ -109,6 +109,15 @@ Only two decisions exist on the wire:
   > holds. Whether to emit `ask` is a design decision, not a protocol
   > constraint, and it should now be taken on its merits.
 
+  **Decided on 2026-08-07: the `ask` → wire-deny mapping stays**, now as a
+  choice rather than as a misreading. Deny is strictly more restrictive than
+  ask, so the mapping cannot admit anything asking would have blocked. `git
+  status` settles at `ask`, which makes this the common path rather than an
+  edge case, so switching it would change what an operator sees on nearly every
+  interpreted command — and there is no live host integration yet to test that
+  change against. Revisit when there is: the reason to keep it is the absence of
+  a way to verify the alternative, not a belief that asking is wrong.
+
   It is left recorded rather than deleted because a claim that shaped an
   implementation should not vanish when it turns out to be wrong; the next
   reader needs to know why the code does what it does.

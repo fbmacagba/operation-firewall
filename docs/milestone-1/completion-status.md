@@ -28,7 +28,7 @@ prerequisite is done, not whether the claim can be made — it cannot.
 | 3 | Windows, Linux, macOS resolver matrices pass without assuming platform defaults | **Partial** |
 | 4 | Red-first, negative, abuse, property, fuzz, mutation, concurrency, deadline and performance gates pass | **Partial** |
 | 5 | No audit/debug/error fixture leaks canary secrets or raw sensitive payloads | **Met** |
-| 6 | The `NoRestriction` advisory is resolved by executable baseline-proof enforcement | **Met, review outstanding** |
+| 6 | The `NoRestriction` advisory is resolved by executable baseline-proof enforcement | **Met** |
 | 7 | Dependency, SBOM, reproducibility, compatibility, rollback and clean-room provenance evidence is current | **Partial** |
 | 8 | README and diagnostics state that approvals, replay protection, revalidation and production enforcement remain Milestone 2 | **Met** |
 
@@ -146,7 +146,7 @@ a bounded operator-authored identifier, or a number. CLI reasons are all
 own messages quote the input and only the classification crosses the boundary.
 Each is canary-tested across `Display`, `Debug` and serialized form.
 
-### 6 — The `NoRestriction` advisory: met, review outstanding
+### 6 — The `NoRestriction` advisory: met
 
 Policy silence cannot reach an allow: allow requires a proof whose derived
 baseline is allow, and an absent proof is always `indeterminate`. This is now
@@ -159,15 +159,24 @@ return `Indeterminate` unless that baseline proves the operation is supported"
 — **is present**: that is exactly `ofw_core::decide`'s signature and its
 absent-proof branch.
 
-It is deliberately left open, because closing it takes two answers and only the
-first is yes. The finding's stated concern was "**if a caller later maps
-`NoRestriction` to allow**", and that half is not structurally prevented:
+The finding's stated concern had a second half — "**if a caller later maps
+`NoRestriction` to allow**" — and that half is not structurally prevented:
 `EffectivePolicy::evaluate` is public, so a caller can read the outcome and
-compose its own answer without calling `decide`. No library API can prevent
-that — a caller who ignores the composition function is writing a different
-decision engine, not bypassing a guard — so the residual is real but not
-fixable by more code here. It is what the required human review should decide
-on, and that review has not happened.
+compose its own answer without calling `decide`.
+
+**The required review happened on 2026-08-07 and accepted that residual.** The
+reasoning: no library API can prevent it. A caller who ignores the composition
+function is writing a different decision engine, not bypassing a guard, and an
+API contorted to make that unexpressible would buy nothing a reader of `decide`
+does not already get. The finding is closed in the ledger via
+`aramid override`, carrying this reasoning, so the decision is auditable rather
+than implicit in the finding's disappearance.
+
+What the review relied on, all first-hand: `decide` takes the proof as an
+explicit argument and returns `Indeterminate` when it is absent; the sixteen-cell
+table asserts `Allow` is reachable from exactly one combination; and weakening
+`decide` so an indeterminate policy no longer short-circuits reds that test and
+no other.
 
 ### 7 — Supply-chain and provenance evidence: partial
 
@@ -204,7 +213,7 @@ now covered by tests.
 
 ## Open items that need a decision rather than effort
 
-All three were decided on 2026-08-07:
+All were decided on 2026-08-07:
 
 - **Fuzzing**: nightly added for the fuzz job only; the workspace pin is
   untouched. Done.
@@ -213,9 +222,14 @@ All three were decided on 2026-08-07:
   this project emits is correct. It also **corrected** a claim in this project's
   own research — `ask` *is* a valid wire decision, so the current
   `ask` → wire-deny mapping is a design choice rather than the protocol
-  constraint it was recorded as. Revisiting it is now an open design question,
-  and the behaviour is safe either way because deny is the more restrictive of
-  the two. Done, with a follow-on decision surfaced.
+  constraint it was recorded as. The follow-on decision that surfaced was then
+  taken: **the mapping stays**, now as a choice. Deny is strictly more
+  restrictive than ask, so it cannot admit anything asking would have blocked;
+  `git status` settles at `ask`, making this the common path rather than an edge
+  case; and there is no live host integration yet against which to test the
+  alternative. Revisit when there is.
 - **Per-platform resolver evidence**: the workspace-wide `forbid(unsafe_code)`
   is kept, and the evidence stays uncollected. Criterion 3 remains partial by
   choice rather than by omission, and this is the reason.
+- **The `NoRestriction` advisory** (criterion 6): reviewed and closed, with the
+  residual accepted and the reasoning recorded in the ledger. See criterion 6.
