@@ -11,9 +11,11 @@ name = "ofw-cli"
 version = "0.1.0"
 dependencies = [
  "ofw-adapter-codex",
+ "ofw-contracts",
  "ofw-core",
  "ofw-intent",
  "ofw-policy",
+ "ofw-resolve",
 ]
 
 [[package]]
@@ -41,4 +43,13 @@ name = "ofw-policy"
 version = "0.1.0"
 dependencies = [
  "ofw-contracts",
+]
+
+[[package]]
+name = "ofw-resolve"
+version = "0.1.0"
+dependencies = [
+ "ofw-contracts",
+ "ofw-core",
+ "ofw-intent",
 ]

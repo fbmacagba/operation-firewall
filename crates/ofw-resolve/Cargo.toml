@@ -1,6 +1,6 @@
 [package]
-name = "ofw-cli"
-description = "Non-interactive command line entry point for Operation Firewall"
+name = "ofw-resolve"
+description = "Trusted-configuration target resolution for Operation Firewall"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,17 +8,10 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-[[bin]]
-name = "ofw"
-path = "src/main.rs"
-
 [dependencies]
-ofw-adapter-codex = { path = "../ofw-adapter-codex" }
 ofw-contracts = { path = "../ofw-contracts" }
 ofw-core = { path = "../ofw-core" }
 ofw-intent = { path = "../ofw-intent" }
-ofw-policy = { path = "../ofw-policy" }
-ofw-resolve = { path = "../ofw-resolve" }
 
 [lints]
 workspace = true

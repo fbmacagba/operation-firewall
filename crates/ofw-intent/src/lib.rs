@@ -22,6 +22,15 @@
 
 use ofw_contracts::{NamespacedName, OperationEffect};
 
+/// The revision of the closed grammar this crate implements.
+///
+/// Recorded in every proof's evidence so a decision made under one grammar is
+/// distinguishable from one made under another. Widening what `interpret`
+/// recognizes, or changing what any recognized shape means, is a change to
+/// this value: a proof carrying a revision the reader does not know about must
+/// be treated as unproven rather than read under the reader's own rules.
+pub const GRAMMAR_REVISION: &str = "1.0.0";
+
 pub const MAX_COMMAND_BYTES: usize = 65_536;
 pub const MAX_TOKENS: usize = 512;
 pub const MAX_TOKEN_BYTES: usize = 4_096;

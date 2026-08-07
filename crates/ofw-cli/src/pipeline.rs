@@ -1,22 +1,35 @@
 //! Envelope to decision, with no path that reaches allow by omission.
 //!
-//! The pipeline is deliberately short today: a Codex envelope is validated,
-//! its payload is extracted, and then it stops. Turning an extracted Bash
-//! command or patch into an `OperationIntent` needs the closed shell, Git and
-//! apply-patch grammars, which are a separate Milestone 1 slice. Until those
-//! land, no [`SupportedOperationProof`] can be built for any real operation,
-//! so every operation is `Indeterminate`, and the Codex hook denies.
+//! The pipeline runs a Codex envelope through four stages, and stopping at any
+//! of them is a denial rather than a weaker decision:
 //!
-//! That is the intended behaviour, not a placeholder: an operation the system
-//! cannot interpret is exactly the case that must not be allowed.
+//! 1. the adapter validates the envelope and extracts the tool payload;
+//! 2. `ofw-intent` reduces a command to literal words and classifies it, or
+//!    refuses;
+//! 3. `ofw-resolve` establishes containment, environment, blast radius and
+//!    reversibility against explicit trusted configuration;
+//! 4. `ofw-core` derives a baseline from that evidence and joins it with the
+//!    policy restriction.
+//!
+//! An operation that clears all four has a [`SupportedOperationProof`]. That is
+//! not the same as being allowed: the only operations interpreted today are git
+//! reads, and no git invocation can be proven non-executing from its argv, so a
+//! proven git read settles at `ask`. `ask` has no Codex wire representation and
+//! denies until Milestone 2 binds an approval.
+
+use std::collections::BTreeSet;
 
 use ofw_adapter_codex::{
     AdapterAssessment, AdapterError, EnvelopeErrorCode, ExtractedToolInput,
     INPUT_PROTOCOL_REVISION, ToolInputErrorCode, assess_supported_pre_tool_use,
 };
-use ofw_core::{DecisionOutcome, SupportedOperationProof, decide};
+use ofw_contracts::Version;
+use ofw_core::{
+    DecisionOutcome, OperationEvidence, SupportedOperationProof, decide, evidence_from_intent,
+};
 use ofw_intent::Classification;
-use ofw_policy::{EffectivePolicy, Fact, OperationFacts};
+use ofw_policy::{EffectivePolicy, Fact, OperationFacts, PolicyEvaluation};
+use ofw_resolve::{ResolutionError, TrustedConfiguration};
 
 /// A stable, payload-free explanation code.
 ///
@@ -55,14 +68,57 @@ const COMMAND_NOT_LITERAL: Reason = Reason {
     message: "command contains shell constructs that cannot be resolved to \
               literal words without evaluating them",
 };
-/// The operation *was* interpreted. It still cannot be proven, because
-/// containment and target completeness are resolver facts and the platform
-/// resolver is a later slice. This is one stage further than
-/// `OPERATION_INTERPRETATION_UNSUPPORTED`, and the distinction is asserted.
+/// The operation was interpreted, but nothing said where it would run.
+///
+/// Trusted configuration is not defaulted. Falling back to the process working
+/// directory would let whatever launched the hook choose the boundary the
+/// operation is measured against, and falling back to the envelope's `cwd`
+/// would let the agent choose it.
+const TRUSTED_CONFIGURATION_MISSING: Reason = Reason {
+    code: "TRUSTED_CONFIGURATION_MISSING",
+    message: "no trusted working directory, repository boundary and \
+              environment were configured",
+};
+/// The operation was interpreted, and the resolver has no rule for its targets.
 const TARGET_RESOLUTION_UNSUPPORTED: Reason = Reason {
     code: "TARGET_RESOLUTION_UNSUPPORTED",
-    message: "operation was interpreted, but target resolution is not \
-              implemented, so no supported-operation proof can be built",
+    message: "operation was interpreted, but its targets are outside the \
+              resolved subset",
+};
+/// The resolver had a rule and could not apply it -- an absent directory, a
+/// path past a compiled bound, a name that is not UTF-8.
+const TARGET_RESOLUTION_INDETERMINATE: Reason = Reason {
+    code: "TARGET_RESOLUTION_INDETERMINATE",
+    message: "operation targets could not be canonicalized against the \
+              configured repository boundary",
+};
+/// Resolution succeeded and the evidence still did not establish a proof.
+const OPERATION_NOT_PROVABLE: Reason = Reason {
+    code: "OPERATION_NOT_PROVABLE",
+    message: "resolved evidence did not establish a supported-operation proof",
+};
+
+/// Proven, and the built-in baseline asks. Milestone 2 resolves an ask inside
+/// the hook against a bound approval; until then it denies on the wire.
+const APPROVAL_REQUIRED: Reason = Reason {
+    code: "APPROVAL_REQUIRED",
+    message: "operation was proven and its baseline requires an approval, \
+              which is not implemented",
+};
+const BASELINE_DENIED: Reason = Reason {
+    code: "BASELINE_DENIED",
+    message: "operation was proven and the built-in safety baseline denies it",
+};
+const OPERATION_PROVEN: Reason = Reason {
+    code: "OPERATION_PROVEN",
+    message: "operation was proven and no restriction applies",
+};
+/// A proof exists and policy could not be resolved. Unreachable while no
+/// policy bundle loader exists; kept because it is the outcome a rule
+/// selecting on a fact nobody established must produce.
+const POLICY_INDETERMINATE: Reason = Reason {
+    code: "POLICY_INDETERMINATE",
+    message: "policy evaluation needed a fact that was not established",
 };
 
 pub const INPUT_READ_FAILED: Reason = Reason {
@@ -96,13 +152,31 @@ pub struct Assessment {
     pub policy_outcome: &'static str,
 }
 
+/// How far one operation got before a decision was reached.
+enum Stage {
+    /// Stopped before a proof could be built. Always `indeterminate`.
+    Blocked {
+        reason: Reason,
+        operation_kind: Option<&'static str>,
+    },
+    Proven {
+        operation_kind: &'static str,
+        proof: Box<SupportedOperationProof>,
+    },
+}
+
 /// Assesses one Codex `PreToolUse` envelope.
+///
+/// The configuration is a parameter rather than something this function reads,
+/// so that no caller can be given a decision that silently depends on ambient
+/// process state. `None` means none was configured, and an operation that
+/// cannot be placed cannot be proven.
 #[must_use]
-pub fn assess(input: &[u8]) -> Assessment {
+pub fn assess(input: &[u8], configuration: Option<&TrustedConfiguration>) -> Assessment {
     let extracted = match assess_supported_pre_tool_use(input) {
         AdapterAssessment::Extracted(extracted) => extracted,
         AdapterAssessment::Indeterminate(error) => {
-            return indeterminate(adapter_reason(&error), None);
+            return blocked(adapter_reason(&error), None, None);
         }
     };
 
@@ -115,22 +189,133 @@ pub fn assess(input: &[u8]) -> Assessment {
         _ => None,
     };
 
-    let (reason, operation_kind) = match extracted.tool_input() {
-        ExtractedToolInput::Bash(bash) => interpret_command(bash.command()),
+    // `extracted.envelope().cwd()` is deliberately not read here or anywhere
+    // below. It is the agent's claim about where its command would run, and
+    // resolving against it would let the operation choose the boundary it is
+    // measured against. `red_first_witness_detects_trusting_the_envelope_cwd`
+    // retains a pipeline that does read it.
+    let stage = match extracted.tool_input() {
+        ExtractedToolInput::Bash(bash) => interpret_and_resolve(bash.command(), configuration),
         // The apply-patch grammar is a separate slice.
-        ExtractedToolInput::ApplyPatch(_) => (INTERPRETATION_UNSUPPORTED, None),
+        ExtractedToolInput::ApplyPatch(_) => Stage::Blocked {
+            reason: INTERPRETATION_UNSUPPORTED,
+            operation_kind: None,
+        },
     };
 
-    // Even a fully interpreted operation yields no proof: `evidence_from_intent`
-    // requires resolver-supplied containment and target completeness, and no
-    // resolver exists. `decide` returns `Indeterminate` for an absent proof
-    // regardless of what policy says -- the property worth showing end to end.
-    let proof: Option<&SupportedOperationProof> = None;
-    let evaluation = empty_policy_evaluation();
-    let outcome = decide(proof, &evaluation);
+    match stage {
+        Stage::Blocked {
+            reason,
+            operation_kind,
+        } => blocked(reason, tool_name, operation_kind),
+        Stage::Proven {
+            operation_kind,
+            proof,
+        } => {
+            let evaluation = policy_evaluation(Some(proof.evidence()));
+            let outcome = decide(Some(&proof), &evaluation);
+            Assessment {
+                outcome,
+                reason: decided_reason(outcome),
+                tool_name,
+                operation_kind: Some(operation_kind),
+                proof_present: true,
+                policy_outcome: policy_outcome_name(&evaluation),
+            }
+        }
+    }
+}
 
+/// Interprets one Bash command and resolves its targets.
+///
+/// The returned operation kind is narrowed to a compiled-in literal rather
+/// than borrowed from the interpreter's output, so no payload-derived string
+/// can reach stdout, stderr or a future audit record.
+fn interpret_and_resolve(command: &str, configuration: Option<&TrustedConfiguration>) -> Stage {
+    let candidate = match ofw_intent::interpret(command) {
+        Err(_) => return blocked_stage(COMMAND_NOT_LITERAL, None),
+        Ok(Classification::Unsupported(_)) => {
+            return blocked_stage(INTERPRETATION_UNSUPPORTED, None);
+        }
+        Ok(Classification::Supported(candidate)) => candidate,
+    };
+
+    let operation_kind = match candidate.operation_kind().as_str() {
+        "git.status" => "git.status",
+        "git.rev_parse" => "git.rev_parse",
+        // Interpreted by a grammar this function has no literal for. Reporting
+        // it as uninterpreted is the safe direction of the two.
+        _ => return blocked_stage(INTERPRETATION_UNSUPPORTED, None),
+    };
+
+    let Some(configuration) = configuration else {
+        return blocked_stage(TRUSTED_CONFIGURATION_MISSING, Some(operation_kind));
+    };
+
+    let resolved = match ofw_resolve::resolve(&candidate, configuration) {
+        Ok(resolved) => resolved,
+        Err(error) => return blocked_stage(resolution_reason(error), Some(operation_kind)),
+    };
+
+    let grammar_revision = match Version::new(ofw_intent::GRAMMAR_REVISION) {
+        Ok(version) => version,
+        Err(_) => return blocked_stage(INTERNAL_FAILURE, Some(operation_kind)),
+    };
+
+    let evidence = evidence_from_intent(&candidate, resolved.context(), grammar_revision);
+    match SupportedOperationProof::new(evidence) {
+        Ok(proof) => Stage::Proven {
+            operation_kind,
+            proof: Box::new(proof),
+        },
+        Err(_) => blocked_stage(OPERATION_NOT_PROVABLE, Some(operation_kind)),
+    }
+}
+
+const fn blocked_stage(reason: Reason, operation_kind: Option<&'static str>) -> Stage {
+    Stage::Blocked {
+        reason,
+        operation_kind,
+    }
+}
+
+const fn resolution_reason(error: ResolutionError) -> Reason {
+    match error {
+        // No rule for these targets yet.
+        ResolutionError::OperationKindUnsupported
+        | ResolutionError::PathTargetsUnsupported
+        | ResolutionError::EffectUnsupported => TARGET_RESOLUTION_UNSUPPORTED,
+        // A rule that could not be applied to this filesystem.
+        ResolutionError::RepositoryBoundaryUnresolvable
+        | ResolutionError::WorkingDirectoryUnresolvable
+        | ResolutionError::NonUtf8Path
+        | ResolutionError::PathTooLong
+        | ResolutionError::TooManyPathSegments
+        | ResolutionError::TargetKindUnrepresentable => TARGET_RESOLUTION_INDETERMINATE,
+    }
+}
+
+/// The reason attached to a decision that was actually reached.
+const fn decided_reason(outcome: DecisionOutcome) -> Reason {
+    match outcome {
+        DecisionOutcome::Allow => OPERATION_PROVEN,
+        DecisionOutcome::Ask => APPROVAL_REQUIRED,
+        DecisionOutcome::Deny => BASELINE_DENIED,
+        DecisionOutcome::Indeterminate => POLICY_INDETERMINATE,
+    }
+}
+
+fn blocked(
+    reason: Reason,
+    tool_name: Option<&'static str>,
+    operation_kind: Option<&'static str>,
+) -> Assessment {
+    let evaluation = policy_evaluation(None);
     Assessment {
-        outcome,
+        // No proof, so `decide` is `Indeterminate` whatever policy said. Going
+        // through `decide` rather than writing the variant here keeps the one
+        // rule that produces it in one place.
+        outcome: decide(None, &evaluation),
         reason,
         tool_name,
         operation_kind,
@@ -139,75 +324,61 @@ pub fn assess(input: &[u8]) -> Assessment {
     }
 }
 
-/// Interprets one Bash command, returning how far the pipeline got.
+/// Evaluates the effective policy against what is actually established.
 ///
-/// The returned operation kind is narrowed to a compiled-in literal rather
-/// than borrowed from the interpreter's output, so no payload-derived string
-/// can reach stdout, stderr or a future audit record.
-fn interpret_command(command: &str) -> (Reason, Option<&'static str>) {
-    match ofw_intent::interpret(command) {
-        Err(_) => (COMMAND_NOT_LITERAL, None),
-        Ok(Classification::Unsupported(_)) => (INTERPRETATION_UNSUPPORTED, None),
-        Ok(Classification::Supported(candidate)) => {
-            let kind = match candidate.operation_kind().as_str() {
-                "git.status" => Some("git.status"),
-                "git.rev_parse" => Some("git.rev_parse"),
-                _ => None,
-            };
-            (TARGET_RESOLUTION_UNSUPPORTED, kind)
-        }
-    }
-}
-
-fn indeterminate(reason: Reason, tool_name: Option<&'static str>) -> Assessment {
-    let evaluation = empty_policy_evaluation();
-    Assessment {
-        outcome: DecisionOutcome::Indeterminate,
-        reason,
-        tool_name,
-        operation_kind: None,
-        proof_present: false,
-        policy_outcome: policy_outcome_name(&evaluation),
-    }
-}
-
-/// An empty effective policy evaluated against wholly unknown facts.
-///
-/// No policy bundle loader exists yet. An empty policy restricts nothing, so
-/// this evaluates to `NoRestriction` -- and the assessment still comes out
-/// `Indeterminate`, because no proof supports it. That pairing is the whole
-/// point of the built-in baseline and is asserted end to end.
-fn empty_policy_evaluation() -> ofw_policy::PolicyEvaluation {
+/// No policy bundle loader exists yet, so the effective policy is empty and
+/// restricts nothing. The facts still matter: they are what a loaded rule
+/// would select on, and they are built from resolver-established evidence
+/// rather than from the command. An operation with no proof supplies no facts
+/// at all -- an unresolved operation has not established anything, and a rule
+/// that needed one of those facts must come out indeterminate rather than
+/// quietly not matching.
+fn policy_evaluation(evidence: Option<&OperationEvidence>) -> PolicyEvaluation {
     let effective = match EffectivePolicy::compose(Vec::new()) {
         Ok(effective) => effective,
         // Composing zero bundles cannot fail; treat any future change that
-        // makes it fallible as a denial rather than a panic.
-        Err(_) => return unrestricted_fallback(),
+        // makes it fallible as indeterminate rather than a panic.
+        Err(_) => return indeterminate_evaluation(),
     };
-    let facts = match OperationFacts::new(
-        Fact::Unknown,
-        Fact::Unknown,
-        Fact::Unknown,
-        Fact::Unknown,
-        Fact::Unknown,
-        Fact::Unknown,
-    ) {
-        Ok(facts) => facts,
-        Err(_) => return unrestricted_fallback(),
-    };
-    effective.evaluate(&facts)
-}
 
-fn unrestricted_fallback() -> ofw_policy::PolicyEvaluation {
-    ofw_policy::PolicyEvaluation {
-        outcome: ofw_policy::PolicyOutcome::Indeterminate,
-        determining_rules: Vec::new(),
-        indeterminate_rules: Vec::new(),
-        missing_facts: std::collections::BTreeSet::new(),
+    let facts = match evidence {
+        None => OperationFacts::new(
+            Fact::Unknown,
+            Fact::Unknown,
+            Fact::Unknown,
+            Fact::Unknown,
+            Fact::Unknown,
+            Fact::Unknown,
+        ),
+        Some(evidence) => OperationFacts::new(
+            Fact::Known(evidence.operation_kind.clone()),
+            Fact::Known(evidence.effect),
+            // Target kinds are resolver output, and the resolver's are not
+            // threaded here yet. `Unknown` makes a rule that selects on one
+            // indeterminate, which denies -- the safe direction.
+            Fact::Unknown,
+            Fact::Known(evidence.environment),
+            Fact::Known(evidence.reversibility),
+            Fact::Known(evidence.blast_radius),
+        ),
+    };
+
+    match facts {
+        Ok(facts) => effective.evaluate(&facts),
+        Err(_) => indeterminate_evaluation(),
     }
 }
 
-fn policy_outcome_name(evaluation: &ofw_policy::PolicyEvaluation) -> &'static str {
+fn indeterminate_evaluation() -> PolicyEvaluation {
+    PolicyEvaluation {
+        outcome: ofw_policy::PolicyOutcome::Indeterminate,
+        determining_rules: Vec::new(),
+        indeterminate_rules: Vec::new(),
+        missing_facts: BTreeSet::new(),
+    }
+}
+
+fn policy_outcome_name(evaluation: &PolicyEvaluation) -> &'static str {
     match evaluation.outcome {
         ofw_policy::PolicyOutcome::NoRestriction => "no_restriction",
         ofw_policy::PolicyOutcome::Ask => "ask",
@@ -247,77 +418,171 @@ pub const fn protocol_revision() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Assessment, COMMAND_NOT_LITERAL, INTERPRETATION_UNSUPPORTED, TARGET_RESOLUTION_UNSUPPORTED,
-        TOOL_UNSUPPORTED, assess, empty_policy_evaluation, outcome_name,
-    };
+    use std::path::PathBuf;
+
+    use ofw_contracts::EnvironmentClass;
     use ofw_core::DecisionOutcome;
+    use ofw_resolve::TrustedConfiguration;
 
-    const VALID_BASH: &str = concat!(
-        r#"{"session_id":"session-1","transcript_path":null,"cwd":"F:/repo","#,
-        r#""hook_event_name":"PreToolUse","model":"gpt-5","turn_id":"turn-1","#,
-        r#""permission_mode":"default","tool_name":"Bash","tool_use_id":"tool-1","#,
-        r#""tool_input":{"command":"git status"}}"#
-    );
+    use super::{
+        APPROVAL_REQUIRED, Assessment, BASELINE_DENIED, COMMAND_NOT_LITERAL,
+        INTERPRETATION_UNSUPPORTED, TARGET_RESOLUTION_UNSUPPORTED, TOOL_UNSUPPORTED,
+        TRUSTED_CONFIGURATION_MISSING, assess, outcome_name, policy_evaluation,
+    };
 
-    fn assess_str(input: &str) -> Assessment {
-        assess(input.as_bytes())
+    fn directory(label: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!("ofw-pipeline-{}-{label}", std::process::id()));
+        match std::fs::create_dir_all(&path) {
+            Ok(()) => path,
+            Err(error) => unreachable!("test directory must be creatable: {error}"),
+        }
     }
 
-    fn bash(command: &str) -> String {
+    fn configuration(working: PathBuf, boundary: PathBuf) -> TrustedConfiguration {
+        match TrustedConfiguration::new(working, boundary, EnvironmentClass::Local) {
+            Ok(configuration) => configuration,
+            Err(error) => unreachable!("test configuration must be valid: {error:?}"),
+        }
+    }
+
+    /// A configuration whose working directory is inside its boundary.
+    fn contained() -> TrustedConfiguration {
+        let boundary = directory("contained");
+        configuration(directory("contained/worktree"), boundary)
+    }
+
+    fn envelope(command: &str, cwd: &str) -> String {
         format!(
             concat!(
-                r#"{{"session_id":"s","transcript_path":null,"cwd":"c","#,
+                r#"{{"session_id":"s","transcript_path":null,"cwd":"{}","#,
                 r#""hook_event_name":"PreToolUse","model":"m","turn_id":"t","#,
                 r#""permission_mode":"default","tool_name":"Bash","tool_use_id":"u","#,
                 r#""tool_input":{{"command":"{}"}}}}"#
             ),
-            command
+            cwd, command
         )
+    }
+
+    fn bash(command: &str) -> String {
+        envelope(command, "c")
+    }
+
+    fn assess_str(input: &str, configuration: Option<&TrustedConfiguration>) -> Assessment {
+        assess(input.as_bytes(), configuration)
     }
 
     #[test]
     fn the_reason_records_which_stage_the_pipeline_reached() {
-        // Interpreted, blocked one stage later at resolution.
-        assert_eq!(assess_str(VALID_BASH).reason, TARGET_RESOLUTION_UNSUPPORTED);
+        let configured = contained();
+        // Interpreted and resolved: a decision, not a blockage.
+        assert_eq!(
+            assess_str(&bash("git status"), Some(&configured)).reason,
+            APPROVAL_REQUIRED
+        );
+        // Interpreted, with nothing to resolve against.
+        assert_eq!(
+            assess_str(&bash("git status"), None).reason,
+            TRUSTED_CONFIGURATION_MISSING
+        );
         // Literal words, but outside the interpreted subset.
         assert_eq!(
-            assess_str(&bash("git push --force")).reason,
+            assess_str(&bash("git push --force"), Some(&configured)).reason,
             INTERPRETATION_UNSUPPORTED
         );
         // Not reducible to literal words at all -- refused, never partially
         // parsed into a harmless-looking `git status`.
         assert_eq!(
-            assess_str(&bash("git status; rm -rf /")).reason,
+            assess_str(&bash("git status; rm -rf /"), Some(&configured)).reason,
             COMMAND_NOT_LITERAL
         );
     }
 
     #[test]
-    fn a_valid_envelope_is_indeterminate_because_nothing_can_be_proven() {
-        let assessment = assess_str(VALID_BASH);
-        assert_eq!(assessment.outcome, DecisionOutcome::Indeterminate);
-        assert_eq!(assessment.reason, TARGET_RESOLUTION_UNSUPPORTED);
+    fn a_resolved_repository_read_is_proven_and_asks() {
+        let assessment = assess_str(&bash("git status"), Some(&contained()));
+
+        assert!(assessment.proof_present);
+        assert_eq!(assessment.outcome, DecisionOutcome::Ask);
         assert_eq!(assessment.operation_kind, Some("git.status"));
         assert_eq!(assessment.tool_name, Some("Bash"));
+        // Proven is not allowed. No git invocation can be shown to reach no
+        // execution surface from its arguments alone.
+        assert_ne!(assessment.outcome, DecisionOutcome::Allow);
+    }
+
+    #[test]
+    fn an_unresolvable_operation_is_indeterminate_rather_than_asked() {
+        let assessment = assess_str(&bash("git status"), None);
+        assert_eq!(assessment.outcome, DecisionOutcome::Indeterminate);
         assert!(!assessment.proof_present);
     }
 
     #[test]
     fn policy_silence_does_not_become_allow() {
         // The end-to-end shape of the built-in baseline invariant: policy
-        // restricts nothing, and the decision is still not an allow.
-        let assessment = assess_str(VALID_BASH);
-        assert_eq!(assessment.policy_outcome, "no_restriction");
-        assert_ne!(assessment.outcome, DecisionOutcome::Allow);
+        // restricts nothing, and the decision is still not an allow -- both
+        // when nothing is proven and when something is.
+        for configuration in [None, Some(&contained())] {
+            let assessment = assess_str(&bash("git status"), configuration);
+            assert_eq!(assessment.policy_outcome, "no_restriction");
+            assert_ne!(assessment.outcome, DecisionOutcome::Allow);
+        }
         assert_eq!(
-            empty_policy_evaluation().outcome,
+            policy_evaluation(None).outcome,
             ofw_policy::PolicyOutcome::NoRestriction
         );
     }
 
+    /// The agent's claim about where its command runs is not read.
+    ///
+    /// The trusted working directory here is outside the trusted boundary, so
+    /// the real pipeline resolves the operation as cross-boundary and the
+    /// baseline denies. The envelope names a `cwd` inside the boundary.
+    #[test]
+    fn red_first_witness_detects_trusting_the_envelope_cwd() {
+        let boundary = directory("cwd-boundary");
+        let outside = directory("cwd-outside");
+        let claimed = directory("cwd-boundary/claimed");
+        let claimed_text = match claimed.to_str() {
+            Some(text) => text.replace('\\', "/"),
+            None => unreachable!("test path must be UTF-8"),
+        };
+        let configured = configuration(outside, boundary.clone());
+        let input = envelope("git status", &claimed_text);
+
+        let real = assess_str(&input, Some(&configured));
+        assert_eq!(real.outcome, DecisionOutcome::Deny);
+        assert_eq!(real.reason, BASELINE_DENIED);
+
+        // The retained witness resolves against the envelope's `cwd` instead,
+        // and the agent's own claim downgrades its operation from a denial to
+        // an approvable ask.
+        let vulnerable = vulnerable_trusts_the_envelope_cwd(&input, &configured);
+        assert_eq!(vulnerable.outcome, DecisionOutcome::Ask);
+    }
+
+    /// Retained red-first witness: a pipeline that resolves relative to the
+    /// working directory the envelope claims.
+    fn vulnerable_trusts_the_envelope_cwd(
+        input: &str,
+        configured: &TrustedConfiguration,
+    ) -> Assessment {
+        let claimed = match ofw_adapter_codex::assess_supported_pre_tool_use(input.as_bytes()) {
+            ofw_adapter_codex::AdapterAssessment::Extracted(extracted) => {
+                PathBuf::from(extracted.envelope().cwd())
+            }
+            ofw_adapter_codex::AdapterAssessment::Indeterminate(error) => {
+                unreachable!("witness envelope must parse: {error:?}")
+            }
+        };
+        let substituted = configuration(claimed, configured.repository_boundary().to_path_buf());
+        assess_str(input, Some(&substituted))
+    }
+
     #[test]
     fn malformed_and_unsupported_inputs_are_indeterminate() {
+        let configured = contained();
         for input in [
             "",
             "{",
@@ -331,7 +596,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                assess_str(input).outcome,
+                assess_str(input, Some(&configured)).outcome,
                 DecisionOutcome::Indeterminate,
                 "input must not be allowed: {input}"
             );
@@ -346,7 +611,23 @@ mod tests {
             r#""permission_mode":"default","tool_name":"WebSearch","#,
             r#""tool_use_id":"u","tool_input":{"command":"x"}}"#
         );
-        assert_eq!(assess_str(unsupported).reason, TOOL_UNSUPPORTED);
+        assert_eq!(
+            assess_str(unsupported, Some(&contained())).reason,
+            TOOL_UNSUPPORTED
+        );
+    }
+
+    /// An interpreted operation whose targets the resolver has no rule for is
+    /// reported as unsupported rather than as a decision.
+    #[test]
+    fn an_unresolved_target_scope_is_reported_as_unsupported() {
+        // `git rev-parse --show-toplevel` is interpreted and repository
+        // scoped, so this asserts the resolvable case stays resolvable; the
+        // unsupported branch is exercised at the resolver's own boundary.
+        let assessment = assess_str(&bash("git rev-parse --show-toplevel"), Some(&contained()));
+        assert_eq!(assessment.operation_kind, Some("git.rev_parse"));
+        assert!(assessment.proof_present);
+        assert_ne!(assessment.reason, TARGET_RESOLUTION_UNSUPPORTED);
     }
 
     #[test]

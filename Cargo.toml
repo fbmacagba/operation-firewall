@@ -6,6 +6,7 @@ members = [
     "crates/ofw-core",
     "crates/ofw-intent",
     "crates/ofw-policy",
+    "crates/ofw-resolve",
 ]
 resolver = "3"
 

@@ -25,16 +25,28 @@ mod pipeline;
 
 use std::io::{Read, Write};
 use std::panic;
+use std::path::PathBuf;
 use std::process;
 use std::thread;
 use std::time::Duration;
 
 use ofw_adapter_codex::MAX_ENVELOPE_BYTES;
 use ofw_core::DecisionOutcome;
+use ofw_resolve::TrustedConfiguration;
 
 use pipeline::{
     Assessment, DEADLINE_EXCEEDED, INPUT_READ_FAILED, INTERNAL_FAILURE, Reason, USAGE_INVALID,
 };
+
+/// Trusted configuration variables.
+///
+/// All three are required together. There is no default for any of them: a
+/// defaulted working directory would be whatever launched the hook, and a
+/// defaulted environment would be an assumption about consequence that nobody
+/// made. Absent configuration leaves every operation unprovable, which denies.
+const WORKING_DIRECTORY_VARIABLE: &str = "OFW_WORKING_DIRECTORY";
+const REPOSITORY_BOUNDARY_VARIABLE: &str = "OFW_REPOSITORY_BOUNDARY";
+const ENVIRONMENT_VARIABLE: &str = "OFW_ENVIRONMENT";
 
 const EXIT_OK: i32 = 0;
 const EXIT_DENY: i32 = 2;
@@ -62,9 +74,13 @@ USAGE:
                                   health as JSON.
     ofw version                   Print version information as JSON.
 
-Operation Firewall is under active development. Intent interpretation, target
-resolution, approvals and audit are not implemented, so no operation can be
-proven supported and every hook invocation denies.
+Trusted configuration comes from the environment and has no defaults. All
+three of OFW_WORKING_DIRECTORY, OFW_REPOSITORY_BOUNDARY and OFW_ENVIRONMENT
+must be set, or no operation can be placed and every operation denies.
+
+Operation Firewall is under active development. Approvals and audit are not
+implemented, and the interpreted subset is read-only git, so no operation
+reaches an allow and every hook invocation denies.
 ";
 
 fn main() {
@@ -101,8 +117,9 @@ fn run_hook(rest: &[&str]) {
     arm_deadline();
 
     let assessment = match panic::catch_unwind(|| {
+        let configuration = trusted_configuration();
         let input = read_bounded_stdin();
-        input.map(|bytes| pipeline::assess(&bytes))
+        input.map(|bytes| pipeline::assess(&bytes, configuration.as_ref()))
     }) {
         Ok(Ok(assessment)) => assessment,
         Ok(Err(reason)) => deny(reason),
@@ -195,9 +212,29 @@ fn read_bounded_stdin() -> Result<Vec<u8>, Reason> {
     Ok(buffer)
 }
 
+/// Builds the trusted configuration, or reports that none was configured.
+///
+/// Every field is required. A partially configured firewall is not a weaker
+/// firewall here -- it is an unconfigured one, because a boundary without a
+/// working directory places nothing and a working directory without a boundary
+/// is measured against nothing.
+fn trusted_configuration() -> Option<TrustedConfiguration> {
+    let working_directory = std::env::var_os(WORKING_DIRECTORY_VARIABLE)?;
+    let repository_boundary = std::env::var_os(REPOSITORY_BOUNDARY_VARIABLE)?;
+    let environment = std::env::var(ENVIRONMENT_VARIABLE).ok()?;
+    let environment = ofw_resolve::environment_from_label(&environment)?;
+
+    TrustedConfiguration::new(
+        PathBuf::from(working_directory),
+        PathBuf::from(repository_boundary),
+        environment,
+    )
+    .ok()
+}
+
 fn run_assess() {
     let assessment = match read_bounded_stdin() {
-        Ok(input) => pipeline::assess(&input),
+        Ok(input) => pipeline::assess(&input, trusted_configuration().as_ref()),
         Err(reason) => Assessment {
             outcome: DecisionOutcome::Indeterminate,
             reason,
@@ -250,25 +287,55 @@ fn run_doctor() {
         .string("policy_evaluation", "implemented")
         .string("built_in_baseline", "implemented")
         .string("codex_envelope_parsing", "implemented")
-        .string("intent_interpretation", "not_implemented")
-        .string("target_resolution", "not_implemented")
+        .string("intent_interpretation", "read_only_git_subset")
+        .string("target_resolution", "repository_scope_only")
+        .string("policy_bundle_loading", "not_implemented")
         .string("audit", "not_implemented")
         .string("approval_capabilities", "not_implemented");
+
+    // Reported as configured or not, never as its contents: the paths are
+    // local filesystem layout and the diagnostics output is copied into bug
+    // reports.
+    let configured = trusted_configuration().is_some();
+    let mut configuration = json::Object::new();
+    configuration
+        .string("source", "process_environment")
+        .boolean("configured", configured)
+        .strings(
+            "required_variables",
+            &[
+                WORKING_DIRECTORY_VARIABLE,
+                REPOSITORY_BOUNDARY_VARIABLE,
+                ENVIRONMENT_VARIABLE,
+            ],
+        )
+        .string(
+            "limitation",
+            "Provenance is not verified. The design requires a bounded \
+             configuration file whose ownership and permissions are checked at \
+             startup; that loader is not implemented.",
+        );
 
     let mut report = json::Object::new();
     report
         .string("schema_version", "1.0")
         .object("adapter", adapter)
         .object("components", implemented)
-        .integer("provable_operation_kinds", 0)
+        .object("trusted_configuration", configuration)
+        // Provable only when trusted configuration is present: without it
+        // nothing can be placed, so nothing can be proven.
+        .integer("provable_operation_kinds", if configured { 2 } else { 0 })
+        .strings("provable_operations", &["git.status", "git.rev_parse"])
         .string("enforcement", "not_active")
         .string("hook_registration", "unconfirmed")
         .string("effective_wire_behaviour", "every operation denies")
         .string(
             "note",
-            "No operation can be proven supported, so every hook invocation \
-             denies. This is a development artifact and not an active \
-             protection boundary.",
+            "Read-only git operations can now be proven, but a proven git read \
+             is `ask` -- no git invocation can be shown non-executing from its \
+             arguments -- and `ask` denies on the wire until approvals exist. \
+             This is a development artifact and not an active protection \
+             boundary.",
         );
 
     print_line(&report.finish());

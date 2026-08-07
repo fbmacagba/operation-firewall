@@ -5,8 +5,13 @@
 //! instead would miss the failure modes that matter here, because Codex reads
 //! a malformed or unexpected stream as a hook failure and lets the tool call
 //! proceed.
+//!
+//! Trusted configuration is passed as child-process environment and every run
+//! starts by removing all three variables, so a developer machine that happens
+//! to have them set cannot turn an unconfigured test into a configured one.
 
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_ofw");
@@ -14,6 +19,10 @@ const BINARY: &str = env!("CARGO_BIN_EXE_ofw");
 const EXIT_OK: i32 = 0;
 const EXIT_DENY: i32 = 2;
 const EXIT_USAGE: i32 = 64;
+
+const WORKING_DIRECTORY_VARIABLE: &str = "OFW_WORKING_DIRECTORY";
+const REPOSITORY_BOUNDARY_VARIABLE: &str = "OFW_REPOSITORY_BOUNDARY";
+const ENVIRONMENT_VARIABLE: &str = "OFW_ENVIRONMENT";
 
 fn envelope(tool_name: &str, command: &str) -> String {
     format!(
@@ -27,14 +36,64 @@ fn envelope(tool_name: &str, command: &str) -> String {
     )
 }
 
+fn directory(label: &str) -> PathBuf {
+    let mut path = std::env::temp_dir();
+    path.push(format!("ofw-e2e-{}-{label}", std::process::id()));
+    match std::fs::create_dir_all(&path) {
+        Ok(()) => path,
+        Err(error) => unreachable!("test directory must be creatable: {error}"),
+    }
+}
+
+fn text(path: &Path) -> String {
+    match path.to_str() {
+        Some(text) => text.to_owned(),
+        None => unreachable!("test path must be UTF-8"),
+    }
+}
+
+/// A working directory inside its repository boundary.
+fn contained() -> Vec<(&'static str, String)> {
+    let boundary = directory("contained");
+    let working = directory("contained/worktree");
+    configuration(&working, &boundary)
+}
+
+/// A working directory that is not inside its repository boundary.
+fn cross_boundary() -> Vec<(&'static str, String)> {
+    configuration(
+        &directory("outside-worktree"),
+        &directory("outside-boundary"),
+    )
+}
+
+fn configuration(working: &Path, boundary: &Path) -> Vec<(&'static str, String)> {
+    vec![
+        (WORKING_DIRECTORY_VARIABLE, text(working)),
+        (REPOSITORY_BOUNDARY_VARIABLE, text(boundary)),
+        (ENVIRONMENT_VARIABLE, "local".to_owned()),
+    ]
+}
+
 fn run(arguments: &[&str], input: &[u8]) -> Output {
-    let mut child = match Command::new(BINARY)
+    run_with(arguments, input, &[])
+}
+
+fn run_with(arguments: &[&str], input: &[u8], environment: &[(&'static str, String)]) -> Output {
+    let mut builder = Command::new(BINARY);
+    builder
         .args(arguments)
+        .env_remove(WORKING_DIRECTORY_VARIABLE)
+        .env_remove(REPOSITORY_BOUNDARY_VARIABLE)
+        .env_remove(ENVIRONMENT_VARIABLE)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+        .stderr(Stdio::piped());
+    for (key, value) in environment {
+        builder.env(key, value);
+    }
+
+    let mut child = match builder.spawn() {
         Ok(child) => child,
         Err(error) => unreachable!("the ofw binary must spawn: {error}"),
     };
@@ -71,7 +130,7 @@ fn stderr(output: &Output) -> String {
 }
 
 #[test]
-fn a_valid_bash_envelope_denies_because_nothing_can_be_proven() {
+fn an_unconfigured_envelope_denies_because_nothing_can_be_placed() {
     let output = run(
         &["hook", "codex-pre-tool-use"],
         envelope("Bash", "git status").as_bytes(),
@@ -86,27 +145,93 @@ fn a_valid_bash_envelope_denies_because_nothing_can_be_proven() {
         stdout(&output)
     );
     assert!(
-        stderr(&output).contains("TARGET_RESOLUTION_UNSUPPORTED"),
+        stderr(&output).contains("TRUSTED_CONFIGURATION_MISSING"),
         "stderr must carry the reason code, got: {}",
         stderr(&output)
     );
 }
 
-/// The observable deliverable of the intent slice: the reason code now records
-/// how far down the pipeline an operation actually got, rather than reporting
-/// "not interpreted" for everything.
+/// The deliverable of the target-resolution slice, asserted as one pairing.
+///
+/// The operation is now *proven*: interpretation and resolution both
+/// succeeded, so a `SupportedOperationProof` exists and the decision is a real
+/// `ask` rather than `indeterminate`. It is still not an allow and still
+/// denies on the wire, and asserting only one half of that would hide the two
+/// ways this can break -- an allow means the execution-surface evidence stopped
+/// reaching the baseline, an indeterminate means the proof is not being built.
+#[test]
+fn a_configured_repository_read_is_proven_asks_and_still_denies_on_the_wire() {
+    let configured = contained();
+    let payload = stdout(&run_with(
+        &["assess"],
+        envelope("Bash", "git status").as_bytes(),
+        &configured,
+    ));
+
+    for expected in [
+        "\"outcome\":\"ask\"",
+        "\"supported_operation_proof\":true",
+        "\"wire_decision\":\"deny\"",
+        "\"reason_code\":\"APPROVAL_REQUIRED\"",
+        "\"operation_kind\":\"git.status\"",
+        "\"policy_outcome\":\"no_restriction\"",
+    ] {
+        assert!(
+            payload.contains(expected),
+            "a proven repository read must report {expected}, got: {payload}"
+        );
+    }
+    assert!(!payload.contains("\"outcome\":\"allow\""));
+
+    // And the hook itself still denies, with nothing on stdout.
+    let hooked = run_with(
+        &["hook", "codex-pre-tool-use"],
+        envelope("Bash", "git status").as_bytes(),
+        &configured,
+    );
+    assert_eq!(code(&hooked), EXIT_DENY);
+    assert!(hooked.stdout.is_empty());
+    assert!(stderr(&hooked).contains("APPROVAL_REQUIRED"));
+}
+
+/// A resolver fact deciding an outcome, with the command held constant.
+///
+/// The same `git status` that asks inside its boundary is denied outside it.
+/// Nothing about the command string differs between the two runs; only what
+/// the resolver found on the filesystem does.
+#[test]
+fn containment_decides_the_outcome_for_an_identical_command() {
+    let command = envelope("Bash", "git status");
+
+    let inside = stdout(&run_with(&["assess"], command.as_bytes(), &contained()));
+    assert!(inside.contains("\"outcome\":\"ask\""), "got: {inside}");
+
+    let outside = stdout(&run_with(
+        &["assess"],
+        command.as_bytes(),
+        &cross_boundary(),
+    ));
+    assert!(outside.contains("\"outcome\":\"deny\""), "got: {outside}");
+    assert!(outside.contains("\"reason_code\":\"BASELINE_DENIED\""));
+    // Proven, and denied on the strength of the proof rather than for want of
+    // one. The distinction is the point of the slice.
+    assert!(outside.contains("\"supported_operation_proof\":true"));
+}
+
+/// The reason code records how far down the pipeline an operation got.
 #[test]
 fn the_reason_code_records_how_far_the_pipeline_reached() {
+    let configured = contained();
     let cases = [
-        // Interpreted successfully -- blocked one stage later, at resolution.
+        // Interpreted and resolved: a decision.
         (
             "git status",
-            "\"reason_code\":\"TARGET_RESOLUTION_UNSUPPORTED\"",
+            "\"reason_code\":\"APPROVAL_REQUIRED\"",
             "\"operation_kind\":\"git.status\"",
         ),
         (
             "git rev-parse --show-toplevel",
-            "\"reason_code\":\"TARGET_RESOLUTION_UNSUPPORTED\"",
+            "\"reason_code\":\"APPROVAL_REQUIRED\"",
             "\"operation_kind\":\"git.rev_parse\"",
         ),
         // Literal words, but outside the interpreted subset.
@@ -124,7 +249,11 @@ fn the_reason_code_records_how_far_the_pipeline_reached() {
     ];
 
     for (command, expected_reason, expected_kind) in cases {
-        let payload = stdout(&run(&["assess"], envelope("Bash", command).as_bytes()));
+        let payload = stdout(&run_with(
+            &["assess"],
+            envelope("Bash", command).as_bytes(),
+            &configured,
+        ));
         assert!(
             payload.contains(expected_reason),
             "{command} should report {expected_reason}, got: {payload}"
@@ -136,6 +265,11 @@ fn the_reason_code_records_how_far_the_pipeline_reached() {
         // Whatever stage it reached, it is still never an allow.
         assert!(payload.contains("\"wire_decision\":\"deny\""));
     }
+
+    // Interpreted, with nothing to place it against.
+    let unplaced = stdout(&run(&["assess"], envelope("Bash", "git status").as_bytes()));
+    assert!(unplaced.contains("\"reason_code\":\"TRUSTED_CONFIGURATION_MISSING\""));
+    assert!(unplaced.contains("\"operation_kind\":\"git.status\""));
 }
 
 #[test]
@@ -153,8 +287,11 @@ fn every_unusable_input_denies() {
         ("oversized envelope", oversized.into_bytes()),
     ];
 
+    // Configured, so that the denial is the input's fault and not the
+    // configuration's.
+    let configured = contained();
     for (label, input) in cases {
-        let output = run(&["hook", "codex-pre-tool-use"], &input);
+        let output = run_with(&["hook", "codex-pre-tool-use"], &input, &configured);
         assert_eq!(code(&output), EXIT_DENY, "{label} must deny");
         assert!(output.stdout.is_empty(), "{label} must leave stdout empty");
         assert!(!output.stderr.is_empty(), "{label} must give a reason");
@@ -169,13 +306,15 @@ fn every_unusable_input_denies() {
 fn no_payload_content_reaches_either_stream() {
     const CANARY: &str = "CANARY_SECRET_a1b2c3d4e5";
 
+    let configured = contained();
     for arguments in [
         ["hook", "codex-pre-tool-use"].as_slice(),
         ["assess"].as_slice(),
     ] {
-        let output = run(
+        let output = run_with(
             arguments,
             envelope("Bash", &format!("git push --token {CANARY}")).as_bytes(),
+            &configured,
         );
         assert!(
             !stdout(&output).contains(CANARY),
@@ -211,7 +350,7 @@ fn assess_emits_one_structured_decision_and_exits_zero() {
     for expected in [
         "\"schema_version\":\"1.0\"",
         "\"outcome\":\"indeterminate\"",
-        "\"reason_code\":\"TARGET_RESOLUTION_UNSUPPORTED\"",
+        "\"reason_code\":\"TRUSTED_CONFIGURATION_MISSING\"",
         "\"tool_name\":\"Bash\"",
         "\"supported_operation_proof\":false",
         "\"wire_decision\":\"deny\"",
@@ -226,37 +365,57 @@ fn assess_emits_one_structured_decision_and_exits_zero() {
 /// The end-to-end form of the invariant the built-in baseline exists for.
 #[test]
 fn policy_silence_does_not_authorize_through_the_cli() {
-    let output = run(&["assess"], envelope("Bash", "git status").as_bytes());
-    let payload = stdout(&output);
+    // Both with and without a proof: policy restricts nothing either way, and
+    // neither is an allow.
+    for environment in [Vec::new(), contained()] {
+        let payload = stdout(&run_with(
+            &["assess"],
+            envelope("Bash", "git status").as_bytes(),
+            &environment,
+        ));
 
-    // Policy restricted nothing...
-    assert!(
-        payload.contains("\"policy_outcome\":\"no_restriction\""),
-        "expected an unrestricted policy, got: {payload}"
-    );
-    // ...and the decision is still not an allow.
-    assert!(!payload.contains("\"outcome\":\"allow\""));
-    assert!(payload.contains("\"wire_decision\":\"deny\""));
+        assert!(
+            payload.contains("\"policy_outcome\":\"no_restriction\""),
+            "expected an unrestricted policy, got: {payload}"
+        );
+        assert!(!payload.contains("\"outcome\":\"allow\""));
+        assert!(payload.contains("\"wire_decision\":\"deny\""));
+    }
 }
 
 #[test]
-fn doctor_reports_that_enforcement_is_not_active() {
+fn doctor_reports_what_is_implemented_without_overstating_it() {
     let output = run(&["doctor"], b"");
     assert_eq!(code(&output), EXIT_OK);
 
     let payload = stdout(&output);
     for expected in [
         "\"enforcement\":\"not_active\"",
-        "\"provable_operation_kinds\":0",
-        "\"intent_interpretation\":\"not_implemented\"",
+        "\"intent_interpretation\":\"read_only_git_subset\"",
+        "\"target_resolution\":\"repository_scope_only\"",
+        "\"approval_capabilities\":\"not_implemented\"",
         "\"hook_registration\":\"unconfirmed\"",
         "\"built_in_baseline\":\"implemented\"",
+        // Unconfigured: nothing can be placed, so nothing is provable.
+        "\"configured\":false",
+        "\"provable_operation_kinds\":0",
     ] {
         assert!(
             payload.contains(expected),
             "doctor output missing {expected}, got: {payload}"
         );
     }
+}
+
+#[test]
+fn doctor_reports_provable_operations_only_once_configured() {
+    let payload = stdout(&run_with(&["doctor"], b"", &contained()));
+    assert!(payload.contains("\"configured\":true"), "got: {payload}");
+    assert!(payload.contains("\"provable_operation_kinds\":2"));
+    // Still not an active protection boundary, and it must not start claiming
+    // to be one just because something became provable.
+    assert!(payload.contains("\"enforcement\":\"not_active\""));
+    assert!(payload.contains("\"effective_wire_behaviour\":\"every operation denies\""));
 }
 
 #[test]
@@ -287,7 +446,7 @@ fn help_goes_to_stdout_and_succeeds() {
 /// Codex treats empty stdout with exit 0 as an allow. A hook that fell back to
 /// "write nothing, exit cleanly" on an unusable input would authorize it. The
 /// assertion that rejects this witness is the same one
-/// `a_valid_bash_envelope_denies_because_nothing_can_be_proven` makes.
+/// `an_unconfigured_envelope_denies_because_nothing_can_be_placed` makes.
 fn vulnerable_empty_stdout_exit_zero() -> (i32, Vec<u8>, Vec<u8>) {
     (EXIT_OK, Vec::new(), Vec::new())
 }

@@ -12,7 +12,7 @@ It evaluates typed operation intent rather than relying only on command-string d
 | Milestone | Status | Scope |
 | --- | --- | --- |
 | 0 — Foundation | Complete | Approved PRD, threat model, architecture decisions, v1 contracts, and clean-room provenance |
-| 1 — Local decision core | In progress | Typed contracts, monotonic policy evaluation, strict bounded Codex envelope parsing, and exact Bash/apply_patch payload extraction implemented; intent interpretation, resolution, audit construction, and CLI remain |
+| 1 — Local decision core | In progress | Typed contracts, monotonic policy evaluation, strict bounded Codex envelope parsing, exact Bash/apply_patch payload extraction, read-only Git intent interpretation, repository-scope target resolution, and the `ofw` CLI implemented; path-operand resolution, policy bundle loading, audit construction, and approvals remain |
 | 2 — Approval and Codex integration | Not started | Bound approvals, replay protection, real `PreToolUse` integration, and enforcement diagnostics |
 | 3 — Broader adapters | Not started | Database, Kubernetes, cloud, IaC, and MCP adapters |
 
@@ -51,16 +51,19 @@ The dependency-free Rust workspace currently contains:
 - `ofw-core` — the built-in safety baseline. A `SupportedOperationProof` cannot be constructed from unknown or incomplete evidence, its baseline is derived from that evidence rather than accepted from the caller, and `decide` joins it with the policy restriction so an absent proof is always `indeterminate` and `NoRestriction` never becomes an allow on its own.
 - `ofw-adapter-codex` — dependency-free, bounded parsing for the documented `PreToolUse` envelope and exact Bash/apply_patch payload subsets with typed fail-safe outcomes.
 - `ofw-intent` — a closed POSIX tokenizer that refuses any command it cannot reduce to literal words, plus per-subcommand flag allowlists for a read-only Git subset (`status`, `rev-parse`).
+- `ofw-resolve` — target resolution against explicit trusted configuration: native canonicalization, containment decided by path component rather than by text, and derived reversibility and blast radius. Target scope is keyed on the operation kind, never on the absence of extracted operands.
 - `ofw-cli` — the non-interactive `ofw` binary: `hook codex-pre-tool-use`, `assess`, `doctor`, and `version`, with a dependency-free JSON writer.
 - Draft 2020-12 JSON schemas for operation intent, decisions, errors, policy bundles, and audit events.
 - Positive and negative contract fixtures with executable red-first vulnerability witnesses.
-- Property-style monotonicity coverage plus retained counterexamples proving each security test can fail: last-writer-wins composition, inverted restriction ordering, unbounded composition, and discarded unresolved-rule identity.
+- Property-style monotonicity coverage plus retained counterexamples proving each security test can fail: last-writer-wins composition, inverted restriction ordering, unbounded composition, discarded unresolved-rule identity, a tokenizer that ignores operators, an allowlist that ignores unknown flags, containment decided by string prefix, containment decided before canonicalization, target scope inferred from absent operands, and a pipeline that trusts the envelope's `cwd`.
 
 Monotonicity is currently guaranteed structurally rather than by check: `Restriction` has no `allow` variant and the only combinator is union, so a lower layer cannot express a weakening. `PolicyLayer` is recorded in rule identity but is not read during evaluation. Cross-layer precedence has one worked example rather than generated coverage, and the v1 deserializer that must reject a bundle rule with `effect: allow` — which the JSON Schema rejects today — is not yet written.
 
-The built-in baseline closes the composition half of the `NoRestriction` advisory: policy silence can no longer reach an allow, because allow now requires a proof whose derived baseline is allow. The advisory is **addressed, not closed** — `EffectivePolicy::evaluate` remains public and still returns `NoRestriction`, so nothing yet forces a caller through `ofw_core::decide`. That becomes structural when the CLI is the single entry point. The proof's evidence fields are also trusted inputs today: establishing that a target really is repository-local is the platform resolver's job, so until that lands a proof is only as strong as its constructor.
+The built-in baseline closes the composition half of the `NoRestriction` advisory: policy silence can no longer reach an allow, because allow now requires a proof whose derived baseline is allow. The advisory is **addressed, not closed** — `EffectivePolicy::evaluate` remains public and still returns `NoRestriction`, so nothing yet forces a caller through `ofw_core::decide`. That becomes structural when the CLI is the single entry point.
 
-Canonical-path selectors currently return `indeterminate` until a platform resolver supplies boundary-safe canonical path facts. Shell/filesystem/Git intent interpretation, v1 contract deserialization, snapshot hashing, target resolution, audit construction, CLI commands, approval capabilities, and live hook integration are not yet implemented.
+Containment, environment, blast radius and reversibility are now resolver output rather than constructor arguments, for the repository-scoped read subset. A proof is correspondingly stronger than it was, and still bounded by what the resolver actually collects: platform-specific evidence — reparse points, mount and volume identity, alternate data streams, per-directory case sensitivity, Unicode normalization — is not gathered, so this is not yet the per-platform resolver matrix the design requires. Canonicalization does go through the platform's native call and does resolve links, so a symlink or junction leading out of the boundary resolves out of the boundary.
+
+Canonical-path selectors still return `indeterminate`: the resolver's canonical targets are not yet threaded into policy facts. v1 contract deserialization, snapshot hashing, path-operand resolution, policy bundle loading, audit construction, approval capabilities, and live hook integration are not yet implemented.
 
 ## Repository layout
 
@@ -72,6 +75,7 @@ crates/
   ofw-core/            Built-in safety baseline and final decision composition
   ofw-intent/          Closed, non-executing shell and Git interpretation
   ofw-policy/          Monotonic restriction evaluation
+  ofw-resolve/         Target resolution against trusted configuration
 policy/
   schemas/v1/          Normative JSON Schema contracts
 tests/fixtures/        Contract fixtures and red-first witnesses
@@ -113,21 +117,35 @@ Every new security-invariant test must first demonstrate that it fails against a
 
 ### Running the CLI
 
+Trusted configuration comes from the environment and has **no defaults**. All three variables are required together; without them nothing can be placed and every operation denies.
+
 ```powershell
+$env:OFW_WORKING_DIRECTORY = "F:\Projects\operation-firewall"
+$env:OFW_REPOSITORY_BOUNDARY = "F:\Projects\operation-firewall"
+$env:OFW_ENVIRONMENT = "local"   # local|development|test|staging|production|shared
+
 cargo run -p ofw-cli -- doctor
 Get-Content envelope.json | cargo run -p ofw-cli -- assess
 Get-Content envelope.json | cargo run -p ofw-cli -- hook codex-pre-tool-use
 ```
 
-**Every hook invocation currently denies, and that is correct.** No `SupportedOperationProof` can be constructed yet, so `decide` returns `indeterminate`, which maps to a wire deny. `ofw doctor` reports `enforcement: not_active` rather than implying broader capability.
+A defaulted working directory would be whatever launched the hook, and a defaulted environment would be an assumption about consequence that nobody made. The envelope's own `cwd` field is never read: it is the agent's claim about where its command would run, and resolving against it would let the operation choose the boundary it is measured against.
+
+Reading configuration from the environment is explicit and outside the repository, but it is **weaker than the design requires** — a bounded configuration file whose ownership and permissions are verified at startup. `ofw doctor` reports that gap rather than leaving it to be discovered.
+
+**Every hook invocation currently denies, and that is correct.** Read-only Git operations can now be *proven* — a `SupportedOperationProof` exists and `decide` returns a real `ask` rather than `indeterminate` — but `ask` has no Codex wire representation and denies until Milestone 2 binds an approval. This slice produces the first proof, not the first allow.
 
 The reason code records how far down the pipeline an operation actually reached:
 
-| command | reason code |
-| --- | --- |
-| `git status` | `TARGET_RESOLUTION_UNSUPPORTED` — interpreted; blocked at resolution |
-| `git push --force` | `OPERATION_INTERPRETATION_UNSUPPORTED` — literal, outside the subset |
-| `git status; rm -rf /` | `COMMAND_NOT_LITERAL` — refused, never partially parsed |
+| command | configuration | reason code |
+| --- | --- | --- |
+| `git status` | configured | `APPROVAL_REQUIRED` — proven; baseline asks |
+| `git status` (outside the boundary) | configured | `BASELINE_DENIED` — proven; baseline denies |
+| `git status` | absent | `TRUSTED_CONFIGURATION_MISSING` — interpreted; nothing to place it against |
+| `git push --force` | either | `OPERATION_INTERPRETATION_UNSUPPORTED` — literal, outside the subset |
+| `git status; rm -rf /` | either | `COMMAND_NOT_LITERAL` — refused, never partially parsed |
+
+Containment is decided by comparing canonical paths **by path component**, not as text. A sibling directory whose name merely begins with the boundary's is outside it, and a traversal or symlink that leaves the boundary resolves outside it. Target scope is keyed on the operation kind rather than on "the interpreter extracted no paths" — those coincide today, and would stop coinciding the moment an operand-extraction bug dropped a pathspec.
 
 **No Git command can be proven non-executing from its arguments alone**, and this is why `git status` settles at `ask` rather than `allow` even once resolution lands. Git consults repository-controlled configuration, and `core.fsmonitor`, `core.pager`, `diff.*.textconv` and external diff drivers all name programs Git will execute — set in `.git/config` by the repository, with no command-line flag involved. `ofw-intent` therefore reports every Git invocation as carrying an execution surface, and `ofw_core::evidence_from_intent` is the only sanctioned path from an interpreted intent to evidence precisely so that this cannot be bypassed by assembling evidence by hand.
 
