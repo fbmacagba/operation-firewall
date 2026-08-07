@@ -37,8 +37,9 @@ prerequisite is done, not whether the claim can be made — it cannot.
 Implemented with tests: typed contracts and strict v1 deserialization, monotonic
 policy evaluation, policy bundle loading and atomic activation, bounded Codex
 envelope parsing, Bash/apply_patch payload extraction, read-only Git intent
-interpretation, repository-scope target resolution, the built-in baseline and
-final composition, structurally redacted audit construction, and the CLI.
+interpretation, repository- and path-scoped target resolution, the built-in
+baseline and final composition, structurally redacted audit construction, and
+the CLI.
 
 Audit persistence landed on 2026-08-07: records append under an exclusive lock,
 segments rotate by atomic same-directory rename, and a damaged trailing record
@@ -67,12 +68,24 @@ the *next* grammar slice:
   are now per-subcommand entries in the grammar table, and `ofw-core` reads
   them through exhaustive matches.
 
-Not implemented: retention, path-operand resolution (`git log`/`show`/`diff`
-need revision and pathspec extraction), the apply-patch grammar, the PowerShell
-subset, the revalidation fingerprint, ownership/permission verification of the
-audit directory (per-platform, and the Windows path needs `unsafe`), and a
-trusted-configuration file loader. `ofw doctor` reports each of these rather
-than implying coverage.
+Path-operand resolution landed on 2026-08-07 for `git log` and `git diff`, the
+first interpreted subcommands taking operands and the first resolution scoped
+to specific paths. An explicit `--` separator is required, because git's
+operand syntax is ambiguous between a revision and a path and git resolves it
+by consulting the ref store and working tree — neither of which this project
+may do. `git log src/main.rs` is therefore refused rather than guessed at.
+Resolution is all-or-nothing: one operand that does not canonicalize fails the
+whole operation. Verified against the built binary, not only in tests —
+`git log -- present.txt` asks, the same command pointed through `../..` at a
+file outside the boundary denies, and an alternate-data-stream spelling is
+refused. `GRAMMAR_REVISION` moved to 1.1.0.
+
+Not implemented: retention, revision operands (so `git show`, and `git log`
+against a revision, stay out of the subset), the apply-patch grammar, the
+PowerShell subset, the revalidation fingerprint, ownership/permission
+verification of the audit directory (per-platform, and the Windows path needs
+`unsafe`), and a trusted-configuration file loader. `ofw doctor` reports each
+of these rather than implying coverage.
 
 ### 2 — Unsupported and incomplete operations deny: met
 
@@ -100,16 +113,18 @@ bindings, which would need `unsafe` in this project's own crates.
 
 ### 4 — Test gates: partial
 
-Present: **131 tests; 23 retained red-first witnesses**; negative and abuse
+Present: **139 tests; 23 retained red-first witnesses**; negative and abuse
 corpora; canary tests on the CLI streams, bundle errors and audit records;
 property-style monotonicity; deadline handling in the hook.
 
-Both figures are counted from a run of `scripts/verify.py` on the day of
-writing, not carried forward. The previous revision of this section said "120
-tests; 23 witnesses" and a session handoff note said "139 tests; 24 witnesses";
-both were wrong, in opposite directions, and neither was checked before being
-repeated. A stale count in a document whose purpose is honest reporting is a
-defect in the document.
+Both figures are counted from a run of `scripts/verify.py` immediately before
+writing them, never carried forward. Earlier the same day this section claimed
+"120 tests; 23 witnesses" while a session handoff note claimed "139 tests; 24
+witnesses", and the true figure at that moment was **131 and 23** — two
+inherited counts, wrong in opposite directions, neither checked before being
+repeated. That the total has since genuinely reached 139 is a coincidence and
+not a vindication of the note. A stale count in a document whose whole purpose
+is honest reporting is a defect in the document.
 
 The decision space is now covered exhaustively rather than by sampled cases:
 three baselines plus the no-proof case against all four policy outcomes,

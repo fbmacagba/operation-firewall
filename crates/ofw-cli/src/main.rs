@@ -93,9 +93,11 @@ Trusted configuration comes from the environment and has no defaults. All
 three of OFW_WORKING_DIRECTORY, OFW_REPOSITORY_BOUNDARY and OFW_ENVIRONMENT
 must be set, or no operation can be placed and every operation denies.
 
-Operation Firewall is under active development. Approvals and audit are not
-implemented, and the interpreted subset is read-only git, so no operation
-reaches an allow and every hook invocation denies.
+Operation Firewall is under active development. Approvals are not implemented,
+and the interpreted subset is read-only git, so no operation reaches an allow
+and every hook invocation denies. Audit records persist when
+OFW_AUDIT_DIRECTORY names a writable directory outside the repository;
+without it audit health is degraded, which blocks mutations and permits reads.
 ";
 
 fn main() {
