@@ -75,3 +75,58 @@ jobs:
 
       - name: Run the verification suite
         run: python -B scripts/verify.py
+
+  supply-chain:
+    name: supply chain
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Install cargo-audit
+        # `--locked` so the tool's own dependency graph is the one its authors
+        # published, not whatever resolves today.
+        run: cargo install cargo-audit --locked --version 0.21.2
+
+      - name: Scan for advisories
+        # The runtime is a security boundary; a known-vulnerable dependency in
+        # it is a failure, not a note. `--deny warnings` also fails on
+        # unmaintained and yanked crates.
+        run: cargo audit --deny warnings
+
+      - name: Review licences and generate the SBOM
+        # Fails closed on any licence expression outside the reviewed
+        # allowlist, including a package with no licence field at all.
+        run: python -B scripts/supply-chain.py --sbom sbom.cyclonedx.json
+
+      - name: Confirm the SBOM is reproducible
+        # It is a pure function of Cargo.lock -- no timestamp, no serial
+        # number -- so a second run over the same commit must be byte
+        # identical. An SBOM that changes without the lockfile changing cannot
+        # be used as evidence of what shipped.
+        run: |
+          python -B scripts/supply-chain.py --sbom sbom.second.json
+          diff sbom.cyclonedx.json sbom.second.json
+
+      - name: Publish the SBOM
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom
+          path: sbom.cyclonedx.json
+          if-no-files-found: error

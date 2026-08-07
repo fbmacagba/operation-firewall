@@ -5,14 +5,16 @@ Operation Firewall is a clean-room, policy-driven safety boundary for AI agents 
 It evaluates typed operation intent rather than relying only on command-string deny lists. The design covers shell execution, filesystem and Git mutation, databases, cloud infrastructure, Kubernetes, infrastructure-as-code, and structured tool or API calls through a common contract.
 
 > [!IMPORTANT]
-> Operation Firewall is under active development. The contracts and first policy-engine slice are implemented, but runtime hooks, target resolvers, approval capabilities, and end-to-end enforcement are not. Do not treat the current repository as an active protection boundary.
+> Operation Firewall is under active development. **Do not treat the current repository as an active protection boundary.**
+>
+> This is not modesty about a nearly-finished system. The approved Milestone 1 design excludes "production active-enforcement claims" and states that Milestone 1 artifacts "are development artifacts, not production enforcement releases… no active-protection claim is permitted." Approvals, replay protection, audit persistence, and a verified live host integration are Milestone 2, and an active-protection claim is not permissible until they exist and are tested.
 
 ## Project status
 
 | Milestone | Status | Scope |
 | --- | --- | --- |
 | 0 — Foundation | Complete | Approved PRD, threat model, architecture decisions, v1 contracts, and clean-room provenance |
-| 1 — Local decision core | In progress | Typed contracts, monotonic policy evaluation, strict bounded Codex envelope parsing, exact Bash/apply_patch payload extraction, read-only Git intent interpretation, repository-scope target resolution, and the `ofw` CLI implemented; path-operand resolution, policy bundle loading, audit construction, and approvals remain |
+| 1 — Local decision core | In progress | Implemented: typed contracts, monotonic policy evaluation, strict v1 bundle deserialization and activation, bounded Codex envelope parsing, Bash/apply_patch payload extraction, read-only Git intent interpretation, repository-scope target resolution, structurally redacted audit construction, and the `ofw` CLI. Remaining: audit persistence, path-operand resolution, per-platform resolver evidence, apply-patch and PowerShell grammars, fuzz targets, and reproducible release verification |
 | 2 — Approval and Codex integration | Not started | Bound approvals, replay protection, real `PreToolUse` integration, and enforcement diagnostics |
 | 3 — Broader adapters | Not started | Database, Kubernetes, cloud, IaC, and MCP adapters |
 
@@ -44,20 +46,21 @@ The Codex `PreToolUse` wire exposes only `allow` and `deny`. Internal `ask` must
 
 ## Implemented today
 
-The dependency-free Rust workspace currently contains:
+The Rust workspace currently contains:
 
 - `ofw-contracts` — bounded identifiers, namespaced names, versions, operation effects, environment classes, reversibility, blast radius, policy layers, and restrictions.
-- `ofw-policy` — validated facts and selectors, immutable restriction union, duplicate identity rejection, bounded composition, canonical ordering, conservative evaluation, and separate diagnostics naming the rules an unavailable fact left unresolved.
+- `ofw-policy` — validated facts and selectors, immutable restriction union, duplicate identity rejection, bounded composition, canonical ordering, conservative evaluation, separate diagnostics naming the rules an unavailable fact left unresolved, and strict v1 bundle deserialization. A bundle is all-or-nothing: one bad rule is a bad bundle, because the thing a lenient loader silently drops is a restriction.
 - `ofw-core` — the built-in safety baseline. A `SupportedOperationProof` cannot be constructed from unknown or incomplete evidence, its baseline is derived from that evidence rather than accepted from the caller, and `decide` joins it with the policy restriction so an absent proof is always `indeterminate` and `NoRestriction` never becomes an allow on its own.
-- `ofw-adapter-codex` — dependency-free, bounded parsing for the documented `PreToolUse` envelope and exact Bash/apply_patch payload subsets with typed fail-safe outcomes.
+- `ofw-adapter-codex` — dependency-free, bounded parsing for the documented `PreToolUse` envelope and exact Bash/apply_patch payload subsets with typed fail-safe outcomes. It keeps its hand-written parser deliberately; see [ADR 0004](docs/decisions/0004-vetted-serialization-and-digest-dependencies.md).
 - `ofw-intent` — a closed POSIX tokenizer that refuses any command it cannot reduce to literal words, plus per-subcommand flag allowlists for a read-only Git subset (`status`, `rev-parse`).
 - `ofw-resolve` — target resolution against explicit trusted configuration: native canonicalization, containment decided by path component rather than by text, and derived reversibility and blast radius. Target scope is keyed on the operation kind, never on the absence of extracted operands.
-- `ofw-cli` — the non-interactive `ofw` binary: `hook codex-pre-tool-use`, `assess`, `doctor`, and `version`, with a dependency-free JSON writer.
+- `ofw-audit` — redacted audit event construction. The event type has **no field that can hold a payload**: every field is a compiled-in literal, a SHA-256 digest, a bounded operator-authored identifier, or a number, so redaction cannot be forgotten when a field is added. Persistence is not implemented.
+- `ofw-cli` — the non-interactive `ofw` binary: `hook codex-pre-tool-use`, `assess`, `doctor`, and `version`, with a dependency-free JSON writer, supplied-policy activation, and audit health gating.
 - Draft 2020-12 JSON schemas for operation intent, decisions, errors, policy bundles, and audit events.
 - Positive and negative contract fixtures with executable red-first vulnerability witnesses.
-- Property-style monotonicity coverage plus retained counterexamples proving each security test can fail: last-writer-wins composition, inverted restriction ordering, unbounded composition, discarded unresolved-rule identity, a tokenizer that ignores operators, an allowlist that ignores unknown flags, containment decided by string prefix, containment decided before canonicalization, target scope inferred from absent operands, and a pipeline that trusts the envelope's `cwd`.
+- Property-style monotonicity coverage plus retained counterexamples proving each security test can fail: last-writer-wins composition, inverted restriction ordering, unbounded composition, discarded unresolved-rule identity, a tokenizer that ignores operators, an allowlist that ignores unknown flags, containment decided by string prefix, containment decided before canonicalization, target scope inferred from absent operands, a pipeline that trusts the envelope's `cwd`, a bundle loader that skips the rules it cannot parse, a failed policy activation treated as an empty policy, an audit event carrying a raw payload, and audit failure ignored for mutations.
 
-Monotonicity is currently guaranteed structurally rather than by check: `Restriction` has no `allow` variant and the only combinator is union, so a lower layer cannot express a weakening. `PolicyLayer` is recorded in rule identity but is not read during evaluation. Cross-layer precedence has one worked example rather than generated coverage, and the v1 deserializer that must reject a bundle rule with `effect: allow` — which the JSON Schema rejects today — is not yet written.
+Monotonicity is guaranteed structurally rather than by check: `Restriction` has no `allow` variant and the only combinator is union, so a lower layer cannot express a weakening. The v1 deserializer inherits that structurally too — `effect: "allow"` is an unknown variant of a type with no such case, so the document does not parse, and `ExternalPolicyLayer` cannot express `builtin`, so a supplied bundle cannot claim to be the baseline. `PolicyLayer` is recorded in rule identity but is not read during evaluation, and cross-layer precedence still has one worked example rather than generated coverage.
 
 The built-in baseline closes the composition half of the `NoRestriction` advisory: policy silence can no longer reach an allow, because allow now requires a proof whose derived baseline is allow. The advisory is **addressed, not closed** — `EffectivePolicy::evaluate` remains public and still returns `NoRestriction`, so nothing yet forces a caller through `ofw_core::decide`. That becomes structural when the CLI is the single entry point.
 
@@ -70,6 +73,7 @@ Canonical-path selectors still return `indeterminate`: the resolver's canonical 
 ```text
 crates/
   ofw-adapter-codex/   Strict bounded parsing and payload extraction for Codex
+  ofw-audit/           Structurally redacted audit event construction
   ofw-cli/             The `ofw` binary: assess, doctor, and the Codex hook
   ofw-contracts/       Validated domain primitives
   ofw-core/            Built-in safety baseline and final decision composition
@@ -94,7 +98,20 @@ scripts/               Deterministic development verification
 - Python 3.11 or newer
 - Python `jsonschema` for development-time contract validation
 
-No third-party crate is currently part of the enforcement runtime.
+The enforcement runtime depends on `serde`, `serde_json` and `sha2`. That is a
+deliberate end to the previous zero-dependency property rather than a drift:
+[ADR 0004](docs/decisions/0004-vetted-serialization-and-digest-dependencies.md)
+records the spelling, ownership, maintenance, licence, feature-surface,
+necessity and advisory review the design requires before a `Cargo.toml` change,
+together with the resolved tree. `serde_json`'s `unbounded_depth` feature stays
+off deliberately: policy bundles are untrusted input and the default 128-level
+recursion limit is the stack-exhaustion guard.
+
+`Cargo.lock` is committed and CI builds `--locked`, so a dependency cannot
+change without a reviewable diff. CI additionally runs `cargo audit`, fails
+closed on any licence outside a reviewed allowlist, and generates a CycloneDX
+SBOM that is a pure function of the lockfile — no timestamp — so it is
+byte-identical across runs over one commit and can be diffed as evidence.
 
 ### Verify the repository
 

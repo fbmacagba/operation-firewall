@@ -272,6 +272,7 @@ fn run_assess() {
         Err(reason) => Assessment {
             outcome: DecisionOutcome::Indeterminate,
             reason,
+            audit_health: "not_applicable",
             tool_name: None,
             operation_kind: None,
             proof_present: false,
@@ -291,6 +292,7 @@ fn run_assess() {
             assessment.operation_kind.unwrap_or("uninterpreted"),
         )
         .boolean("supported_operation_proof", assessment.proof_present)
+        .string("audit_health", assessment.audit_health)
         .string("policy_outcome", assessment.policy_outcome)
         .string("adapter_protocol_revision", pipeline::protocol_revision())
         .string("wire_decision", wire_decision(assessment.outcome));
@@ -324,7 +326,8 @@ fn run_doctor() {
         .string("intent_interpretation", "read_only_git_subset")
         .string("target_resolution", "repository_scope_only")
         .string("policy_bundle_loading", "implemented")
-        .string("audit", "not_implemented")
+        .string("audit_construction", "implemented")
+        .string("audit_persistence", "not_implemented")
         .string("approval_capabilities", "not_implemented");
 
     let activation = policy_activation();
@@ -399,6 +402,15 @@ fn run_doctor() {
         )
         .strings("provable_operations", &["git.status", "git.rev_parse"])
         .string("enforcement", "not_active")
+        // There is no sink, so there is no audit trail. Reported rather than
+        // assumed: this is what makes a mutation refuse today.
+        .string("audit_health", "unhealthy")
+        .string(
+            "audit_note",
+            "Audit events are constructed and redacted, but not persisted. \
+             Every state-changing operation is therefore indeterminate; a \
+             proven read continues with degraded health.",
+        )
         .string("hook_registration", "unconfirmed")
         .string("effective_wire_behaviour", "every operation denies")
         .string(

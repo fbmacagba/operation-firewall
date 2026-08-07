@@ -31,6 +31,8 @@ use ofw_intent::Classification;
 use ofw_policy::{EffectivePolicy, Fact, OperationFacts, PolicyEvaluation, PolicyOutcome};
 use ofw_resolve::{ResolutionError, TrustedConfiguration};
 
+use ofw_audit::{AuditGate, AuditHealth};
+
 use crate::policy::PolicyActivation;
 
 /// A stable, payload-free explanation code.
@@ -99,6 +101,24 @@ const OPERATION_NOT_PROVABLE: Reason = Reason {
     code: "OPERATION_NOT_PROVABLE",
     message: "resolved evidence did not establish a supported-operation proof",
 };
+/// A mutation that cannot be recorded is not performed.
+///
+/// Unreachable while the interpreted subset is read-only -- no envelope can
+/// carry a mutation this far. The rule is exercised at `ofw_audit::gate`,
+/// which is the function that decides it.
+const AUDIT_UNAVAILABLE_FOR_MUTATION: Reason = Reason {
+    code: "AUDIT_UNAVAILABLE_FOR_MUTATION",
+    message: "operation changes state and no audit trail is available to \
+              record it",
+};
+
+/// The audit sink's health.
+///
+/// Persistence is not implemented, so there is no sink and the honest value is
+/// `unhealthy`. It is reported rather than assumed: an operator reading
+/// `audit: unhealthy` knows that a mutation would be refused today, which is
+/// the behaviour they would otherwise discover the first time one mattered.
+const AUDIT_HEALTH: AuditHealth = AuditHealth::Unhealthy;
 
 /// Proven, and the built-in baseline asks. Milestone 2 resolves an ask inside
 /// the hook against a bound approval; until then it denies on the wire.
@@ -178,6 +198,13 @@ pub const USAGE_INVALID: Reason = Reason {
 pub struct Assessment {
     pub outcome: DecisionOutcome,
     pub reason: Reason,
+    /// Whether the decision was reached with a working audit trail.
+    ///
+    /// Reported rather than folded into the outcome, because a read that
+    /// proceeded on a degraded sink is a different situation from one that
+    /// proceeded on a healthy one, and a log that cannot tell them apart
+    /// cannot answer "was this recorded?" afterwards.
+    pub audit_health: &'static str,
     /// `None` until the envelope has been validated far enough to know it.
     /// Only ever one of the adapter's compiled-in supported tool names.
     pub tool_name: Option<&'static str>,
@@ -223,6 +250,7 @@ pub fn assess(input: &[u8], context: &AssessmentContext<'_>) -> Assessment {
             return Assessment {
                 outcome: DecisionOutcome::Indeterminate,
                 reason: *reason,
+                audit_health: "unknown",
                 tool_name: None,
                 operation_kind: None,
                 proof_present: false,
@@ -274,10 +302,35 @@ pub fn assess(input: &[u8], context: &AssessmentContext<'_>) -> Assessment {
             proof,
         } => {
             let evaluation = evaluate(policy, Some(proof.evidence()));
-            let outcome = decide(Some(&proof), &evaluation);
+            let decided = decide(Some(&proof), &evaluation);
+
+            // A decision that cannot be recorded is not automatically a
+            // decision. The gate raises a mutation to indeterminate when there
+            // is no audit trail, and lets a read through with its health
+            // reported honestly.
+            let (outcome, reason, audit_health) =
+                match ofw_audit::gate(proof.evidence().effect, AUDIT_HEALTH) {
+                    AuditGate::Proceed => (
+                        decided,
+                        decided_reason(decided, evaluation.outcome),
+                        "healthy",
+                    ),
+                    AuditGate::ProceedDegraded => (
+                        decided,
+                        decided_reason(decided, evaluation.outcome),
+                        "degraded",
+                    ),
+                    AuditGate::Indeterminate => (
+                        DecisionOutcome::Indeterminate,
+                        AUDIT_UNAVAILABLE_FOR_MUTATION,
+                        "unhealthy",
+                    ),
+                };
+
             Assessment {
                 outcome,
-                reason: decided_reason(outcome, evaluation.outcome),
+                reason,
+                audit_health,
                 tool_name,
                 operation_kind: Some(operation_kind),
                 proof_present: true,
@@ -389,6 +442,8 @@ fn blocked(
         // rule that produces it in one place.
         outcome: decide(None, &evaluation),
         reason,
+        // Nothing was decided, so nothing needed recording.
+        audit_health: "not_applicable",
         tool_name,
         operation_kind,
         proof_present: false,

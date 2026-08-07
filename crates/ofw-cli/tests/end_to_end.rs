@@ -222,6 +222,9 @@ fn a_configured_repository_read_is_proven_asks_and_still_denies_on_the_wire() {
         "\"wire_decision\":\"deny\"",
         "\"reason_code\":\"APPROVAL_REQUIRED\"",
         "\"operation_kind\":\"git.status\"",
+        // Proven and decided, with no audit trail behind it. A read may
+        // continue; the record must say it was not recorded.
+        "\"audit_health\":\"degraded\"",
         "\"policy_outcome\":\"no_restriction\"",
     ] {
         assert!(
@@ -440,6 +443,9 @@ fn doctor_reports_what_is_implemented_without_overstating_it() {
     for expected in [
         "\"enforcement\":\"not_active\"",
         "\"intent_interpretation\":\"read_only_git_subset\"",
+        "\"audit_construction\":\"implemented\"",
+        "\"audit_persistence\":\"not_implemented\"",
+        "\"audit_health\":\"unhealthy\"",
         "\"target_resolution\":\"repository_scope_only\"",
         "\"approval_capabilities\":\"not_implemented\"",
         "\"hook_registration\":\"unconfirmed\"",
