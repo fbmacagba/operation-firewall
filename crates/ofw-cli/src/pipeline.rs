@@ -899,6 +899,75 @@ mod tests {
         }
     }
 
+    /// The design's warm-path budget: p95 at or below 25 ms.
+    ///
+    /// Measured in process and excluding startup, because the design says so
+    /// explicitly — "performance evidence is reported separately from process
+    /// startup and filesystem cold-cache behavior". Startup and cold cache are
+    /// real costs to a host, but they are not what this budget governs, and
+    /// folding them in would make the number unattributable.
+    ///
+    /// The path measured is the whole assessment: envelope parse, tokenize,
+    /// classify, resolve (which makes real canonicalization syscalls), derive
+    /// the baseline, evaluate policy, compose. A warm-up pass runs first so the
+    /// filesystem cache and the allocator are in steady state, which is what
+    /// "warm path" means.
+    ///
+    /// The assertion is deliberately against the published budget rather than
+    /// against the measured value plus a margin. A ratchet tuned to today's
+    /// number would fail on a slower CI runner for no defect, and the budget is
+    /// the thing that was promised.
+    ///
+    /// It runs under `cargo test`, so it measures a **debug** build — roughly
+    /// the worst case, since the shipped binary is built with optimizations.
+    /// Measured on Windows at authoring time: median 1.05 ms, p95 1.27 ms,
+    /// about twenty times under budget. That headroom is why a hard assertion
+    /// here is not expected to be flaky; if it ever fires, something
+    /// algorithmic changed rather than the runner having a bad minute.
+    #[test]
+    fn warm_path_assessment_stays_within_the_deadline_budget() {
+        const WARM_UP: usize = 50;
+        const SAMPLES: usize = 200;
+        const BUDGET: std::time::Duration = std::time::Duration::from_millis(25);
+
+        let configuration = contained();
+        let tracked = configuration.working_directory().join("perf.txt");
+        match std::fs::write(&tracked, b"contents") {
+            Ok(()) => {}
+            Err(error) => unreachable!("test file must be writable: {error}"),
+        }
+        // A path-scoped read: the most work any currently interpreted command
+        // causes, because it canonicalizes an operand as well as the boundary.
+        let envelope = bash("git log -- perf.txt");
+
+        for _ in 0..WARM_UP {
+            let _ = assess_str(&envelope, Some(&configuration));
+        }
+
+        let mut samples = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let started = std::time::Instant::now();
+            let assessment = assess_str(&envelope, Some(&configuration));
+            samples.push(started.elapsed());
+            // Measuring a path that failed early would measure nothing.
+            assert!(assessment.proof_present, "the measured path must be proven");
+        }
+
+        samples.sort_unstable();
+        // Index 189 of 0..=199 is the 95th percentile by nearest-rank.
+        let index = (SAMPLES * 95).div_ceil(100) - 1;
+        let p95 = samples[index];
+        let median = samples[SAMPLES / 2];
+
+        assert!(
+            p95 <= BUDGET,
+            "warm-path p95 {p95:?} exceeds the {BUDGET:?} budget (median {median:?})"
+        );
+        // Printed so a green run still carries the evidence rather than only
+        // the verdict. `cargo test -- --nocapture` shows it.
+        println!("warm-path assess: median {median:?}, p95 {p95:?}, budget {BUDGET:?}");
+    }
+
     /// A pathspec pointing outside the boundary denies, on the same command
     /// shape that is otherwise merely `ask`.
     ///
