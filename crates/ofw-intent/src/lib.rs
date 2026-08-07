@@ -29,6 +29,18 @@ use ofw_contracts::{NamespacedName, OperationEffect};
 /// recognizes, or changing what any recognized shape means, is a change to
 /// this value: a proof carrying a revision the reader does not know about must
 /// be treated as unproven rather than read under the reader's own rules.
+///
+/// Held at `1.0.0` through the 2026-08-07 change that moved `effect`,
+/// privilege and publication into the subcommand table. Judged deliberately
+/// rather than left silent: the recognized shapes are unchanged, and every
+/// value the table now states is the value that was previously produced, so no
+/// command is interpreted differently and no decision moves. The addition of
+/// `privilege_risk` and `publication_risk` widens what a candidate *reports*
+/// without changing what any recognized shape *means*. A reader holding a
+/// `1.0.0` proof would draw the same conclusion from either version.
+///
+/// `interpreted_subset_is_pinned` pins the subset per revision, so a widening
+/// that does need a bump cannot reach green without one.
 pub const GRAMMAR_REVISION: &str = "1.0.0";
 
 pub const MAX_COMMAND_BYTES: usize = 65_536;
@@ -422,10 +434,21 @@ mod tests {
     /// Editing this test to admit a new subcommand is the intended way through
     /// -- the point is that it cannot be skipped, and that the values have to
     /// be typed out a second time where a reviewer will see them.
+    ///
+    /// The subset is pinned *per grammar revision* rather than alongside a
+    /// separate assertion that the revision is unchanged. An earlier version
+    /// asserted both independently, which inverted the incentive: widening the
+    /// subset reded the test, the remedy `GRAMMAR_REVISION`'s own documentation
+    /// prescribes is to bump it, and bumping it reded the same test again. The
+    /// cheapest way to green was to edit the expected subset and leave the
+    /// revision alone -- exactly the outcome the pin exists to prevent.
+    /// Measured, not reasoned: a bump to `1.1.0` alone failed at that line.
+    ///
+    /// Pairing them makes the correct action the green one. A widen without a
+    /// bump fails the comparison; a bump without a stated subset falls to the
+    /// catch-all; a bump with its subset written out passes.
     #[test]
     fn interpreted_subset_is_pinned() {
-        assert_eq!(GRAMMAR_REVISION, "1.0.0");
-
         let declared: Vec<_> = INTERPRETED_SUBCOMMANDS
             .iter()
             .map(|profile| {
@@ -439,9 +462,8 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(
-            declared,
-            vec![
+        let expected = match GRAMMAR_REVISION {
+            "1.0.0" => vec![
                 (
                     "status",
                     "git.status",
@@ -457,8 +479,18 @@ mod tests {
                     PublicationRisk::Contained,
                 ),
             ],
+            other => unreachable!(
+                "grammar revision {other} has no pinned subset: write out what \
+                 this revision interprets, one arm per revision, stating every \
+                 subcommand's effect, privilege and publication explicitly"
+            ),
+        };
+
+        assert_eq!(
+            declared, expected,
             "widening the interpreted subset is a grammar revision and a \
-             security decision per field"
+             security decision per field: bump GRAMMAR_REVISION and add an arm \
+             above rather than editing this one"
         );
     }
 
