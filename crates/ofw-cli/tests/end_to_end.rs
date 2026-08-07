@@ -23,6 +23,7 @@ const EXIT_USAGE: i32 = 64;
 const WORKING_DIRECTORY_VARIABLE: &str = "OFW_WORKING_DIRECTORY";
 const REPOSITORY_BOUNDARY_VARIABLE: &str = "OFW_REPOSITORY_BOUNDARY";
 const ENVIRONMENT_VARIABLE: &str = "OFW_ENVIRONMENT";
+const CONFIG_FILE_VARIABLE: &str = "OFW_CONFIG_FILE";
 const POLICY_DIRECTORY_VARIABLE: &str = "OFW_POLICY_DIRECTORY";
 const AUDIT_DIRECTORY_VARIABLE: &str = "OFW_AUDIT_DIRECTORY";
 
@@ -74,9 +75,37 @@ fn envelope(tool_name: &str, command: &str) -> String {
     )
 }
 
+/// This process's own directory tree, emptied exactly once before first use.
+///
+/// The cleanup is not tidiness, it is correctness. Directories were previously
+/// named `ofw-e2e-<pid>-<label>` and never removed, and several tests here
+/// assert on an *exact* audit record count. An operating system reuses process
+/// ids, so a later run eventually lands on a pid whose leftovers are still on
+/// disk and reads a trail it did not write — `a_decision_is_recorded…` sees two
+/// records where it wrote one, and `doctor_probes_do_not_write…` sees a segment
+/// that no probe created.
+///
+/// It was found by measurement, not reasoning: the suite failed once under
+/// load, and the temp directory held 892 leftover roots, five of them with a
+/// populated `audit-trail`. `ofw-audit/tests/persistence.rs` already cleans for
+/// this stated reason; this file did not.
+///
+/// `Once` rather than a per-`directory` removal because the labels nest —
+/// `contained/worktree` lives inside `contained`, so cleaning per call would
+/// let one test delete another's tree mid-run.
+fn test_root() -> PathBuf {
+    static CLEAN: std::sync::Once = std::sync::Once::new();
+    let mut root = std::env::temp_dir();
+    root.push(format!("ofw-e2e-{}", std::process::id()));
+    CLEAN.call_once(|| {
+        // Scoped to this process's own directory under the system temp path.
+        let _ = std::fs::remove_dir_all(&root);
+    });
+    root
+}
+
 fn directory(label: &str) -> PathBuf {
-    let mut path = std::env::temp_dir();
-    path.push(format!("ofw-e2e-{}-{label}", std::process::id()));
+    let path = test_root().join(label);
     match std::fs::create_dir_all(&path) {
         Ok(()) => path,
         Err(error) => unreachable!("test directory must be creatable: {error}"),
@@ -136,6 +165,7 @@ fn run_with(arguments: &[&str], input: &[u8], environment: &[(&'static str, Stri
         .env_remove(ENVIRONMENT_VARIABLE)
         .env_remove(POLICY_DIRECTORY_VARIABLE)
         .env_remove(AUDIT_DIRECTORY_VARIABLE)
+        .env_remove(CONFIG_FILE_VARIABLE)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -865,4 +895,83 @@ fn doctor_probes_do_not_write_to_the_audit_trail() {
         Err(error) => unreachable!("a real decision must be recorded: {error}"),
     };
     assert_eq!(recorded, 1, "exactly the real decision");
+}
+
+/// A named configuration file that cannot be used must not fall back to the
+/// environment variables.
+///
+/// The fallback is the dangerous shape, and it is the one that looks helpful:
+/// an operator who set a file and also has variables set would get a working
+/// firewall either way, so nothing would ever reveal that the file stopped
+/// being consulted. Someone who can make the file unreadable -- a permission
+/// flip, a rename, a full disk -- would then silently downgrade the deployment
+/// from the checked loader to the unchecked one. Refusing outright means the
+/// operator finds out.
+#[test]
+fn a_rejected_configuration_file_does_not_fall_back_to_the_environment() {
+    let boundary = directory("config-precedence");
+    let working = directory("config-precedence/worktree");
+
+    // Valid environment configuration, deliberately present throughout.
+    let mut environment = configuration(&working, &boundary);
+
+    // A good file wins over the variables, and is reported as the source.
+    let good = boundary.join("ofw.conf");
+    let body = format!(
+        "working_directory = {}\nrepository_boundary = {}\nenvironment = test\n",
+        working.display(),
+        boundary.display()
+    );
+    match std::fs::write(&good, body.as_bytes()) {
+        Ok(()) => {}
+        Err(error) => unreachable!("test file must be writable: {error}"),
+    }
+    environment.push((CONFIG_FILE_VARIABLE, text(&good)));
+    let report = doctor_configuration(&environment);
+    assert_eq!(report.0, "configuration_file");
+    assert!(report.1, "a good file must configure");
+
+    // Now point at a file that is not there, keeping the valid variables.
+    let mut broken = environment.clone();
+    let missing = boundary.join("absent.conf");
+    match broken.last_mut() {
+        Some(entry) => entry.1 = text(&missing),
+        None => unreachable!("the config file variable must be present"),
+    }
+    let report = doctor_configuration(&broken);
+    assert_eq!(
+        report.0, "configuration_file_rejected",
+        "an unusable file must be reported, not silently replaced"
+    );
+    assert!(
+        !report.1,
+        "an unusable file must leave the firewall unconfigured despite valid \
+         environment variables being set"
+    );
+}
+
+/// Runs `doctor` and returns `(source, configured)` from its configuration
+/// block.
+fn doctor_configuration(environment: &[(&'static str, String)]) -> (String, bool) {
+    let output = run_with(&["doctor"], b"", environment);
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let source = field_after(&text, "\"source\":\"");
+    let configured = text.contains("\"configured\":true");
+    (source, configured)
+}
+
+/// Extracts a string field value without a JSON parser.
+///
+/// The CLI writes JSON with a hand-rolled writer and this test deliberately
+/// does not import a parser to read it back: a parser shared by producer and
+/// consumer can agree with itself about a shape neither should emit.
+fn field_after(haystack: &str, marker: &str) -> String {
+    let Some(start) = haystack.find(marker) else {
+        unreachable!("doctor output must contain {marker}: {haystack}");
+    };
+    let rest = &haystack[start + marker.len()..];
+    match rest.find('"') {
+        Some(end) => rest[..end].to_owned(),
+        None => unreachable!("unterminated field in doctor output"),
+    }
 }

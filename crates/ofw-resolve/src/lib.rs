@@ -52,23 +52,35 @@ pub const MAX_PATH_SEGMENTS: usize = 64;
 ///
 /// # Provenance
 ///
-/// This slice's only loader reads process environment variables (see the CLI).
-/// That is explicit and outside the repository, but it is weaker than the
-/// design's eventual requirement: a bounded configuration file whose ownership
-/// and permissions are verified at startup. The gap is reported by
-/// `ofw doctor` rather than left for a reader to discover.
+/// Two loaders exist. [`TrustedConfiguration::from_file`] reads a bounded file
+/// and verifies its size, its structure and — on Unix — that it is not writable
+/// by group or others. The CLI also accepts process environment variables,
+/// which are explicit and outside the repository but carry no such checks.
+///
+/// Neither verifies **ownership**. That needs the effective uid on Unix and the
+/// Win32 security API on Windows, and neither is reachable under this
+/// workspace's `forbid(unsafe_code)` without a dependency taking the `unsafe`
+/// on this crate's behalf. On Windows the permission check does not run either,
+/// because `std` exposes only a read-only flag while the real answer is an ACL.
+/// `ofw doctor` reports which loader supplied the configuration and what was
+/// checked, rather than leaving a reader to assume the stronger answer.
 ///
 /// The practical exposure today is nil rather than merely small: `environment`
 /// only gates baseline rows that reach `allow`, and no operation in the
 /// interpreted subset can reach `allow` at all. It becomes load-bearing the
-/// moment a non-executing operation is interpreted, which is why the file
-/// loader has to exist before that lands.
+/// moment a non-executing operation is interpreted.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TrustedConfiguration {
     working_directory: PathBuf,
     repository_boundary: PathBuf,
     environment: EnvironmentClass,
 }
+
+/// The largest trusted-configuration file this crate will read.
+///
+/// Trusted configuration is a handful of short lines. A bound here means an
+/// enormous file is refused before it is read into memory rather than after.
+pub const MAX_CONFIGURATION_BYTES: u64 = 65_536;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConfigurationError {
@@ -80,6 +92,21 @@ pub enum ConfigurationError {
     EnvironmentNotConfigurable,
     PathTooLong,
     NonUtf8Path,
+    /// The file could not be opened, read, or stat'd.
+    FileUnreadable,
+    FileTooLarge,
+    /// The file is writable by someone other than its owner.
+    ///
+    /// Refused rather than warned about: a configuration file anyone may write
+    /// is not trusted configuration, and this file names the boundary every
+    /// containment decision is measured against. Someone who can rewrite it can
+    /// move the boundary around any operation they like.
+    FileWritableByOthers,
+    /// A line that is neither blank, a comment, nor `key = value`.
+    FileMalformed,
+    FileUnknownKey,
+    FileDuplicateKey,
+    FileMissingKey,
 }
 
 impl TrustedConfiguration {
@@ -144,6 +171,125 @@ impl TrustedConfiguration {
         canonicalize(&self.working_directory).is_some()
             && canonicalize(&self.repository_boundary).is_some()
     }
+
+    /// Loads trusted configuration from a file, verifying what can be verified.
+    ///
+    /// The design requires "a bounded configuration file whose ownership and
+    /// permissions are verified at startup". This delivers the bound and the
+    /// permission half; the ownership half is stated honestly below rather than
+    /// implied by the function existing.
+    ///
+    /// Format is deliberately not JSON or TOML: `key = value`, one per line,
+    /// `#` comments, every key required exactly once and no unknown key
+    /// tolerated. A configuration file that silently ignores a key it does not
+    /// understand is one where a typo in `repository_boundary` reads as an
+    /// absent boundary, and this crate has no defaults to fall back on. Writing
+    /// the parser by hand also keeps a serialization dependency out of the
+    /// crate that decides containment.
+    ///
+    /// # What is verified, and what is not
+    ///
+    /// **Verified:** size, that every required key is present exactly once,
+    /// that no unknown key appears, and — on Unix — that the file is not
+    /// writable by group or others.
+    ///
+    /// **Not verified:** that the file is *owned* by the invoking user. That
+    /// needs the effective uid on Unix and the Win32 security API on Windows,
+    /// neither reachable under this workspace's `forbid(unsafe_code)` without a
+    /// dependency carrying the `unsafe` on this crate's behalf. On Windows the
+    /// permission check does not run at all, because `std` exposes only a
+    /// read-only flag and the real answer lives in an ACL.
+    ///
+    /// So this is a genuine improvement on reading environment variables with
+    /// no checks, and it is not the full requirement. `ofw doctor` reports the
+    /// difference rather than leaving a reader to assume the stronger one.
+    pub fn from_file(path: &Path) -> Result<Self, ConfigurationError> {
+        let metadata = std::fs::metadata(path).map_err(|_| ConfigurationError::FileUnreadable)?;
+        if metadata.len() > MAX_CONFIGURATION_BYTES {
+            return Err(ConfigurationError::FileTooLarge);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if !permissions_are_exclusive(metadata.permissions().mode()) {
+                return Err(ConfigurationError::FileWritableByOthers);
+            }
+        }
+
+        let contents =
+            std::fs::read_to_string(path).map_err(|_| ConfigurationError::FileUnreadable)?;
+        parse_configuration(&contents)
+    }
+}
+
+/// Whether a Unix mode denies write to group and others.
+///
+/// Separated from the syscall so the rule itself is testable on every platform,
+/// including the one where it cannot be applied. The alternative — asserting it
+/// only inside `#[cfg(unix)]` — would leave the decision untested on two of the
+/// three CI platforms while looking covered.
+#[must_use]
+pub const fn permissions_are_exclusive(mode: u32) -> bool {
+    // 0o022 is group-write plus other-write. Read access is not checked: a
+    // readable boundary path is not a secret, and refusing readable
+    // configuration would push operators toward modes they do not understand.
+    mode & 0o022 == 0
+}
+
+/// Parses the `key = value` body of a trusted-configuration file.
+///
+/// Public for tests on every platform; the file-reading half is what varies.
+pub fn parse_configuration(contents: &str) -> Result<TrustedConfiguration, ConfigurationError> {
+    let mut working_directory: Option<PathBuf> = None;
+    let mut repository_boundary: Option<PathBuf> = None;
+    let mut environment: Option<EnvironmentClass> = None;
+
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(ConfigurationError::FileMalformed);
+        };
+        let (key, value) = (key.trim(), value.trim());
+        if key.is_empty() || value.is_empty() {
+            return Err(ConfigurationError::FileMalformed);
+        }
+
+        // Each arm refuses a second occurrence. Last-writer-wins would let a
+        // line appended to the end of the file silently replace the boundary.
+        match key {
+            "working_directory" => {
+                if working_directory.replace(PathBuf::from(value)).is_some() {
+                    return Err(ConfigurationError::FileDuplicateKey);
+                }
+            }
+            "repository_boundary" => {
+                if repository_boundary.replace(PathBuf::from(value)).is_some() {
+                    return Err(ConfigurationError::FileDuplicateKey);
+                }
+            }
+            "environment" => {
+                let class =
+                    environment_from_label(value).ok_or(ConfigurationError::FileMalformed)?;
+                if environment.replace(class).is_some() {
+                    return Err(ConfigurationError::FileDuplicateKey);
+                }
+            }
+            _ => return Err(ConfigurationError::FileUnknownKey),
+        }
+    }
+
+    let (Some(working_directory), Some(repository_boundary), Some(environment)) =
+        (working_directory, repository_boundary, environment)
+    else {
+        return Err(ConfigurationError::FileMissingKey);
+    };
+
+    // Every value still goes through the same constructor an in-process caller
+    // uses, so a file cannot produce a configuration a caller could not.
+    TrustedConfiguration::new(working_directory, repository_boundary, environment)
 }
 
 /// Maps a configuration label to an environment class.
@@ -627,7 +773,8 @@ mod tests {
     use super::{
         ConfigurationError, Digest, FingerprintChange, MAX_PATH_BYTES, ResolutionError,
         Revalidation, RevalidationFingerprint, TargetScope, TrustedConfiguration, bounded_utf8,
-        environment_from_label, frame, resolve, revalidate, target_scope,
+        environment_from_label, frame, parse_configuration, permissions_are_exclusive, resolve,
+        revalidate, target_scope,
     };
 
     /// Creates a real directory under the system temporary directory.
@@ -1172,6 +1319,131 @@ mod tests {
             vulnerable_separator_joined_digest(&left).value(),
             vulnerable_separator_joined_digest(&right).value()
         );
+    }
+
+    #[test]
+    fn a_configuration_file_is_parsed_strictly() {
+        let directory = directory("config-parse");
+        let body = format!(
+            "# trusted configuration\nworking_directory = {}\nrepository_boundary = {}\n\nenvironment = local\n",
+            directory.display(),
+            directory.display()
+        );
+        match parse_configuration(&body) {
+            Ok(configuration) => {
+                assert_eq!(configuration.environment(), EnvironmentClass::Local);
+                assert_eq!(configuration.repository_boundary(), directory);
+            }
+            Err(error) => unreachable!("a well-formed file must parse: {error:?}"),
+        }
+
+        let complete = format!(
+            "working_directory = {}\nrepository_boundary = {}\nenvironment = local\n",
+            directory.display(),
+            directory.display()
+        );
+        let cases = [
+            // A key repeated is refused rather than last-writer-wins: a line
+            // appended to the end of the file must not silently move the
+            // boundary every containment decision is measured against.
+            (
+                format!("{complete}repository_boundary = {}\n", directory.display()),
+                ConfigurationError::FileDuplicateKey,
+            ),
+            // A key this build does not understand is refused, not skipped.
+            // Skipping turns a typo into an absent value, and there are no
+            // defaults for an absent value to fall back to.
+            (
+                format!("{complete}repositry_boundary = /tmp\n"),
+                ConfigurationError::FileUnknownKey,
+            ),
+            (
+                "working_directory = /repo\n".to_owned(),
+                ConfigurationError::FileMissingKey,
+            ),
+            (
+                format!("{complete}not a pair\n"),
+                ConfigurationError::FileMalformed,
+            ),
+            (
+                format!("{complete}environment=\n"),
+                ConfigurationError::FileMalformed,
+            ),
+        ];
+        for (body, expected) in cases {
+            assert_eq!(parse_configuration(&body), Err(expected), "body: {body:?}");
+        }
+
+        // `unknown` is not a label a file may assert, exactly as it is not one
+        // a caller may pass.
+        let unknown = format!(
+            "working_directory = {}\nrepository_boundary = {}\nenvironment = unknown\n",
+            directory.display(),
+            directory.display()
+        );
+        assert_eq!(
+            parse_configuration(&unknown),
+            Err(ConfigurationError::FileMalformed)
+        );
+    }
+
+    /// Configuration anyone may write is not trusted configuration.
+    ///
+    /// The rule is asserted on every platform even though it can only be
+    /// *applied* on Unix, because the decision is a pure function of the mode.
+    /// Asserting it only under `#[cfg(unix)]` would leave it untested on two of
+    /// the three CI platforms while appearing covered.
+    #[test]
+    fn red_first_witness_detects_a_loader_that_ignores_permissions() {
+        // Owner-only and owner-plus-group-read are fine; anything that lets
+        // another account write is not.
+        assert!(permissions_are_exclusive(0o600));
+        assert!(permissions_are_exclusive(0o644));
+        assert!(permissions_are_exclusive(0o444));
+        assert!(!permissions_are_exclusive(0o666));
+        assert!(!permissions_are_exclusive(0o620), "group-writable");
+        assert!(!permissions_are_exclusive(0o602), "world-writable");
+        assert!(!permissions_are_exclusive(0o777));
+
+        // The retained witness checks that the file is readable and calls that
+        // a permission check. It accepts a world-writable boundary definition.
+        assert!(vulnerable_permissions_check(0o666));
+        assert!(vulnerable_permissions_check(0o777));
+    }
+
+    #[test]
+    fn a_missing_configuration_file_is_an_error_rather_than_a_default() {
+        let mut absent = directory("config-absent");
+        absent.push("no-such-file.conf");
+        assert_eq!(
+            TrustedConfiguration::from_file(&absent),
+            Err(ConfigurationError::FileUnreadable)
+        );
+    }
+
+    #[test]
+    fn a_configuration_file_round_trips_from_disk() {
+        let directory = directory("config-file");
+        let path = directory.join("ofw.conf");
+        let body = format!(
+            "working_directory = {}\nrepository_boundary = {}\nenvironment = test\n",
+            directory.display(),
+            directory.display()
+        );
+        match std::fs::write(&path, body.as_bytes()) {
+            Ok(()) => {}
+            Err(error) => unreachable!("test file must be writable: {error}"),
+        }
+        match TrustedConfiguration::from_file(&path) {
+            Ok(configuration) => assert_eq!(configuration.environment(), EnvironmentClass::Test),
+            Err(error) => unreachable!("the file must load: {error:?}"),
+        }
+    }
+
+    /// Retained red-first witness: a "permission check" that only confirms the
+    /// file can be read.
+    const fn vulnerable_permissions_check(mode: u32) -> bool {
+        mode & 0o400 != 0
     }
 
     /// Retained red-first witness: revalidation that skips the target set.

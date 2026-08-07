@@ -52,6 +52,10 @@ use pipeline::{
 const WORKING_DIRECTORY_VARIABLE: &str = "OFW_WORKING_DIRECTORY";
 const REPOSITORY_BOUNDARY_VARIABLE: &str = "OFW_REPOSITORY_BOUNDARY";
 const ENVIRONMENT_VARIABLE: &str = "OFW_ENVIRONMENT";
+/// Names a trusted-configuration file. Takes precedence over the three
+/// variables above, and a file that cannot be used is a hard stop rather than a
+/// fall-through to them.
+const CONFIG_FILE_VARIABLE: &str = "OFW_CONFIG_FILE";
 
 /// Optional. A deployment that configures no supplied policy is healthy and
 /// runs on the built-in baseline alone -- policy is restriction-only, so its
@@ -89,9 +93,20 @@ USAGE:
                                   health as JSON.
     ofw version                   Print version information as JSON.
 
-Trusted configuration comes from the environment and has no defaults. All
-three of OFW_WORKING_DIRECTORY, OFW_REPOSITORY_BOUNDARY and OFW_ENVIRONMENT
-must be set, or no operation can be placed and every operation denies.
+Trusted configuration has no defaults, and comes from one of two places:
+
+  OFW_CONFIG_FILE     A file of `key = value` lines: working_directory,
+                      repository_boundary and environment, each exactly once.
+                      Size and structure are checked, and on Unix the file must
+                      not be writable by group or others. Ownership is not
+                      verified on any platform. This takes precedence, and a
+                      named file that cannot be used stops the process rather
+                      than falling back to the variables below.
+  OFW_WORKING_DIRECTORY, OFW_REPOSITORY_BOUNDARY, OFW_ENVIRONMENT
+                      All three required together. No provenance checks are
+                      possible on environment variables.
+
+With neither, no operation can be placed and every operation denies.
 
 Operation Firewall is under active development. Approvals are not implemented,
 and the interpreted subset is read-only git, so no operation reaches an allow
@@ -168,9 +183,13 @@ fn run_hook(rest: &[&str]) {
 
     match assessment.outcome {
         DecisionOutcome::Allow => allow(),
-        // `ask` has no wire representation: the Codex docs describe it as a
-        // configuration error. Milestone 2 resolves an ask inside this process
-        // against a bound approval before exiting; until then it denies.
+        // `ask` IS a valid wire decision in codex-cli 0.146.0 -- confirmed
+        // against the binary's embedded schema, correcting this project's own
+        // earlier research. Mapping it to deny is therefore a choice, taken on
+        // 2026-08-07 and recorded in docs/research/codex-hook-protocol.md:
+        // deny is strictly more restrictive, and there is no live host
+        // integration yet against which to test emitting a real ask.
+        // Milestone 2 resolves an ask against a bound approval before exiting.
         DecisionOutcome::Ask | DecisionOutcome::Deny | DecisionOutcome::Indeterminate => {
             deny(assessment.reason)
         }
@@ -259,17 +278,65 @@ fn read_bounded_stdin() -> Result<Vec<u8>, Reason> {
 /// working directory places nothing and a working directory without a boundary
 /// is measured against nothing.
 fn trusted_configuration() -> Option<TrustedConfiguration> {
-    let working_directory = std::env::var_os(WORKING_DIRECTORY_VARIABLE)?;
-    let repository_boundary = std::env::var_os(REPOSITORY_BOUNDARY_VARIABLE)?;
-    let environment = std::env::var(ENVIRONMENT_VARIABLE).ok()?;
-    let environment = ofw_resolve::environment_from_label(&environment)?;
+    configuration_with_provenance().0
+}
 
-    TrustedConfiguration::new(
-        PathBuf::from(working_directory),
-        PathBuf::from(repository_boundary),
-        environment,
-    )
-    .ok()
+/// Where the active configuration came from.
+///
+/// Reported by `doctor`, because "configured" is not one fact. A file whose
+/// permissions were checked and a set of environment variables that could have
+/// been set by anything in the process tree are both "configured", and an
+/// operator deciding whether to trust this deployment needs to know which.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConfigurationProvenance {
+    /// No configuration at all: every operation is indeterminate.
+    Absent,
+    /// A file named by `OFW_CONFIG_FILE`, size- and structure-checked, and on
+    /// Unix confirmed not writable by group or others. Ownership is not
+    /// verified on any platform.
+    File,
+    /// `OFW_CONFIG_FILE` was set and the file could not be used. Deliberately
+    /// distinct from `Absent`: an operator who pointed at a file and got
+    /// silence would otherwise conclude the file was fine.
+    FileRejected,
+    /// Process environment variables, with no provenance checks available.
+    Environment,
+}
+
+/// Resolves configuration and reports where it came from.
+///
+/// A configuration **file takes precedence** over the variables, and a file
+/// that is named but unusable is a hard stop rather than a fall-through to the
+/// environment. Falling back would mean an attacker who can make the file
+/// unreadable — a permission flip, a rename — silently downgrades the
+/// deployment to the loader with no checks, which is a worse position than
+/// having no file at all.
+fn configuration_with_provenance() -> (Option<TrustedConfiguration>, ConfigurationProvenance) {
+    if let Some(path) = std::env::var_os(CONFIG_FILE_VARIABLE) {
+        return match TrustedConfiguration::from_file(&PathBuf::from(path)) {
+            Ok(configuration) => (Some(configuration), ConfigurationProvenance::File),
+            Err(_) => (None, ConfigurationProvenance::FileRejected),
+        };
+    }
+
+    let from_environment = || -> Option<TrustedConfiguration> {
+        let working_directory = std::env::var_os(WORKING_DIRECTORY_VARIABLE)?;
+        let repository_boundary = std::env::var_os(REPOSITORY_BOUNDARY_VARIABLE)?;
+        let environment = std::env::var(ENVIRONMENT_VARIABLE).ok()?;
+        let environment = ofw_resolve::environment_from_label(&environment)?;
+
+        TrustedConfiguration::new(
+            PathBuf::from(working_directory),
+            PathBuf::from(repository_boundary),
+            environment,
+        )
+        .ok()
+    };
+
+    match from_environment() {
+        Some(configuration) => (Some(configuration), ConfigurationProvenance::Environment),
+        None => (None, ConfigurationProvenance::Absent),
+    }
 }
 
 /// The configured audit directory, if any.
@@ -419,16 +486,47 @@ fn run_doctor() {
     // first is how diagnostics start overstating. `TrustedConfiguration::new`
     // validates shape, not existence, so a boundary containing a typo is
     // well-formed configuration against which nothing resolves.
-    let configuration_state = trusted_configuration();
+    let (configuration_state, provenance) = configuration_with_provenance();
     let configured = configuration_state.is_some();
     let resolvable = configuration_state
         .as_ref()
         .is_some_and(TrustedConfiguration::paths_resolvable);
+    // Which loader supplied it is a separate fact from whether anything did.
+    // A file whose permissions were checked and a set of environment variables
+    // that anything in the process tree could have set are both "configured".
+    let (source, limitation) = match provenance {
+        ConfigurationProvenance::File => (
+            "configuration_file",
+            "Size, structure and -- on Unix only -- group/other write \
+             permission are verified. Ownership is not verified on any \
+             platform, and on Windows no permission check runs at all, because \
+             both need APIs unreachable under forbid(unsafe_code).",
+        ),
+        ConfigurationProvenance::FileRejected => (
+            "configuration_file_rejected",
+            "OFW_CONFIG_FILE names a file that could not be used: unreadable, \
+             oversized, malformed, or writable by group or others. This is a \
+             hard stop and does not fall back to the environment variables, \
+             because falling back would let anyone who can break the file \
+             downgrade the deployment to the unchecked loader.",
+        ),
+        ConfigurationProvenance::Environment => (
+            "process_environment",
+            "Provenance is not verified and cannot be: anything in the process \
+             tree can set these. Set OFW_CONFIG_FILE instead to get the checks \
+             the design requires.",
+        ),
+        ConfigurationProvenance::Absent => (
+            "none",
+            "No configuration. Every operation is unprovable, which denies.",
+        ),
+    };
     let mut configuration = json::Object::new();
     configuration
-        .string("source", "process_environment")
+        .string("source", source)
         .boolean("configured", configured)
         .boolean("paths_resolvable", resolvable)
+        .string("configuration_file_variable", CONFIG_FILE_VARIABLE)
         .strings(
             "required_variables",
             &[
@@ -437,12 +535,7 @@ fn run_doctor() {
                 ENVIRONMENT_VARIABLE,
             ],
         )
-        .string(
-            "limitation",
-            "Provenance is not verified. The design requires a bounded \
-             configuration file whose ownership and permissions are checked at \
-             startup; that loader is not implemented.",
-        );
+        .string("limitation", limitation);
 
     // Probes execute the installed command path rather than calling the
     // pipeline in process. An in-process call would only re-prove what the
