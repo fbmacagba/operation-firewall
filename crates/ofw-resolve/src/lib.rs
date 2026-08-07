@@ -771,10 +771,10 @@ mod tests {
     use ofw_intent::{Classification, IntentCandidate};
 
     use super::{
-        ConfigurationError, Digest, FingerprintChange, MAX_PATH_BYTES, ResolutionError,
-        Revalidation, RevalidationFingerprint, TargetScope, TrustedConfiguration, bounded_utf8,
-        environment_from_label, frame, parse_configuration, permissions_are_exclusive, resolve,
-        revalidate, target_scope,
+        ConfigurationError, Digest, FingerprintChange, MAX_CONFIGURATION_BYTES, MAX_PATH_BYTES,
+        MAX_PATH_SEGMENTS, ResolutionError, Revalidation, RevalidationFingerprint, TargetScope,
+        TrustedConfiguration, bounded_utf8, environment_from_label, frame, parse_configuration,
+        permissions_are_exclusive, resolve, revalidate, target_scope,
     };
 
     /// Creates a real directory under the system temporary directory.
@@ -1115,6 +1115,60 @@ mod tests {
         );
     }
 
+    /// Every documented environment label maps to its own class, and nothing
+    /// else maps at all.
+    ///
+    /// Three of the six arms were covered before a mutation run showed that
+    /// deleting `development`, `staging` or `shared` changed nothing any test
+    /// could see. A deleted arm falls through to `None`, so a configuration
+    /// naming that environment is refused -- fail-closed, and a silent loss of
+    /// a documented label rather than a bypass. Refusing to load is still the
+    /// wrong answer for a label the documentation promises.
+    #[test]
+    fn every_environment_label_maps_to_its_own_class() {
+        let labels = [
+            ("local", EnvironmentClass::Local),
+            ("development", EnvironmentClass::Development),
+            ("test", EnvironmentClass::Test),
+            ("staging", EnvironmentClass::Staging),
+            ("production", EnvironmentClass::Production),
+            ("shared", EnvironmentClass::Shared),
+        ];
+
+        let mut seen: std::collections::BTreeSet<EnvironmentClass> =
+            std::collections::BTreeSet::new();
+        for (label, class) in labels {
+            assert_eq!(environment_from_label(label), Some(class), "label {label}");
+            assert!(seen.insert(class), "two labels map to {class:?}");
+            match class {
+                // Exhaustive on purpose. A class added later stops compiling
+                // here until it is given a label above -- except `Unknown`,
+                // which must never acquire one.
+                EnvironmentClass::Local
+                | EnvironmentClass::Development
+                | EnvironmentClass::Test
+                | EnvironmentClass::Staging
+                | EnvironmentClass::Production
+                | EnvironmentClass::Shared => {}
+                EnvironmentClass::Unknown => {
+                    unreachable!("`unknown` means nobody established this; it is not a label")
+                }
+            }
+        }
+
+        for label in [
+            "unknown",
+            "Local",
+            "",
+            " local",
+            "local ",
+            "prod",
+            "production\n",
+        ] {
+            assert_eq!(environment_from_label(label), None, "label {label:?}");
+        }
+    }
+
     /// Shape and existence are separate questions, and the constructor only
     /// answers the first. Diagnostics that conflated them would report a typo
     /// as working configuration.
@@ -1151,6 +1205,74 @@ mod tests {
         );
 
         assert!(bounded_utf8(Path::new("/repo/src")).is_ok());
+
+        // Both bounds pinned from below as well. Without these the checks are
+        // only constrained from above, and tightening either by one -- refusing
+        // a path of exactly the documented size -- changes nothing any test can
+        // see. That direction cannot turn a deny into an allow, but it refuses
+        // work the documentation promises, which is its own defect.
+        let at_byte_limit = PathBuf::from(format!("/{}", "a".repeat(MAX_PATH_BYTES - 1)));
+        assert_eq!(at_byte_limit.as_os_str().len(), MAX_PATH_BYTES);
+        assert!(
+            bounded_utf8(&at_byte_limit).is_ok(),
+            "a path of exactly the byte limit is allowed"
+        );
+
+        let mut at_segment_limit = PathBuf::from("/");
+        // The root counts as a component, so this loop adds one fewer.
+        for _ in 1..MAX_PATH_SEGMENTS {
+            at_segment_limit.push("d");
+        }
+        assert_eq!(at_segment_limit.components().count(), MAX_PATH_SEGMENTS);
+        assert!(
+            bounded_utf8(&at_segment_limit).is_ok(),
+            "a path of exactly the segment limit is allowed"
+        );
+    }
+
+    /// Every reason a resolution failed reaches the operator as distinct,
+    /// non-empty text.
+    ///
+    /// Every variant here is `indeterminate` to the caller, so the message is
+    /// the only thing that distinguishes "the boundary does not canonicalize"
+    /// from "a path operand does not". An empty or duplicated message turns a
+    /// diagnosable misconfiguration into an unexplained refusal.
+    #[test]
+    fn every_resolution_error_renders_a_distinct_message() {
+        let all = [
+            ResolutionError::OperationKindUnsupported,
+            ResolutionError::OperandsUnexpectedForKind,
+            ResolutionError::PathOperandUnresolvable,
+            ResolutionError::EffectUnsupported,
+            ResolutionError::RepositoryBoundaryUnresolvable,
+            ResolutionError::WorkingDirectoryUnresolvable,
+            ResolutionError::NonUtf8Path,
+            ResolutionError::PathTooLong,
+            ResolutionError::TooManyPathSegments,
+            ResolutionError::TargetKindUnrepresentable,
+        ];
+
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for error in all {
+            let rendered = match error {
+                // Exhaustive on purpose. A variant added later stops compiling
+                // here until it is named, so this test cannot silently fall
+                // behind the enum it claims to cover.
+                ResolutionError::OperationKindUnsupported
+                | ResolutionError::OperandsUnexpectedForKind
+                | ResolutionError::PathOperandUnresolvable
+                | ResolutionError::EffectUnsupported
+                | ResolutionError::RepositoryBoundaryUnresolvable
+                | ResolutionError::WorkingDirectoryUnresolvable
+                | ResolutionError::NonUtf8Path
+                | ResolutionError::PathTooLong
+                | ResolutionError::TooManyPathSegments
+                | ResolutionError::TargetKindUnrepresentable => error.to_string(),
+            };
+            assert!(!rendered.is_empty(), "{error:?} renders nothing");
+            assert!(seen.insert(rendered), "{error:?} shares another message");
+        }
+        assert_eq!(seen.len(), all.len());
     }
 
     /// Retained red-first witness: containment decided by string prefix.
@@ -1369,6 +1491,21 @@ mod tests {
                 format!("{complete}environment=\n"),
                 ConfigurationError::FileMalformed,
             ),
+            // An empty key and an empty value are each malformed on their own,
+            // which is why the pair is checked with `||`. Both would still be
+            // refused under `&&` -- an empty key reaches the unknown-key arm,
+            // an empty value reaches the constructor as a relative path -- but
+            // by a later check that was never meant to carry this, and
+            // reporting the wrong reason for a refusal is how a malformed file
+            // gets diagnosed as the wrong problem.
+            (
+                format!("{complete} = local\n"),
+                ConfigurationError::FileMalformed,
+            ),
+            (
+                format!("{complete}working_directory =\n"),
+                ConfigurationError::FileMalformed,
+            ),
         ];
         for (body, expected) in cases {
             assert_eq!(parse_configuration(&body), Err(expected), "body: {body:?}");
@@ -1438,6 +1575,89 @@ mod tests {
             Ok(configuration) => assert_eq!(configuration.environment(), EnvironmentClass::Test),
             Err(error) => unreachable!("the file must load: {error:?}"),
         }
+    }
+
+    /// The configuration-file size bound is enforced at its boundary.
+    ///
+    /// Both directions matter and they fail differently. Refusing at exactly
+    /// the limit denies a file the documentation says is acceptable; refusing
+    /// *only* at one byte over -- which is what replacing `>` with `==` does --
+    /// leaves everything larger unbounded, so the check stops being a bound at
+    /// all. A single over-limit case lands on the one value that mutation still
+    /// rejects, which is why there are three of them here.
+    #[test]
+    fn the_configuration_size_bound_holds_at_its_boundary() {
+        let directory = directory("config-size");
+        let path = directory.join("bounded.conf");
+        let body = format!(
+            "working_directory = {}\nrepository_boundary = {}\nenvironment = local\n",
+            directory.display(),
+            directory.display()
+        );
+        let limit = match usize::try_from(MAX_CONFIGURATION_BYTES) {
+            Ok(limit) => limit,
+            Err(error) => unreachable!("the byte limit must fit a usize: {error}"),
+        };
+
+        // Comment lines are ignored, so the file can be padded to an exact size
+        // without changing what it configures.
+        let write_file_of = |total: usize| {
+            let contents = format!("{body}#{}\n", "p".repeat(total - body.len() - 2));
+            assert_eq!(contents.len(), total, "the fixture is exact");
+            match std::fs::write(&path, contents.as_bytes()) {
+                Ok(()) => {}
+                Err(error) => unreachable!("test file must be writable: {error}"),
+            }
+        };
+
+        write_file_of(limit);
+        assert!(
+            TrustedConfiguration::from_file(&path).is_ok(),
+            "a file of exactly the limit is accepted"
+        );
+
+        for excess in [1, 2, 4_096] {
+            write_file_of(limit + excess);
+            assert_eq!(
+                TrustedConfiguration::from_file(&path),
+                Err(ConfigurationError::FileTooLarge),
+                "a file {excess} bytes over the limit must be refused"
+            );
+        }
+    }
+
+    /// The fingerprint records how many targets it covers.
+    ///
+    /// The count is one of the fields `revalidate` compares, and Milestone 2
+    /// binds an approval to the fingerprint as a whole. A constant count would
+    /// let an approval taken over two files revalidate against one, so the
+    /// existing coverage -- two fingerprints agreeing with each other -- is not
+    /// enough: both agree just as well when both are wrong.
+    #[test]
+    fn the_fingerprint_records_how_many_targets_it_covers() {
+        let boundary = directory("fingerprint-count");
+        let working = directory("fingerprint-count/worktree");
+        for name in ["one.txt", "two.txt"] {
+            match std::fs::write(working.join(name), b"contents") {
+                Ok(()) => {}
+                Err(error) => unreachable!("test file must be writable: {error}"),
+            }
+        }
+        let configuration = configuration(working, boundary);
+
+        // A repository-scoped read covers the repository: one target.
+        assert_eq!(
+            fingerprint_for("git status", &configuration).target_count(),
+            1
+        );
+        assert_eq!(
+            fingerprint_for("git log -- one.txt", &configuration).target_count(),
+            1
+        );
+        assert_eq!(
+            fingerprint_for("git log -- one.txt two.txt", &configuration).target_count(),
+            2
+        );
     }
 
     /// Retained red-first witness: a "permission check" that only confirms the
