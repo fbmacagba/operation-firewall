@@ -66,6 +66,16 @@ def main() -> int:
     cargo = cargo_executable()
     environment = toolchain_environment()
     run([sys.executable, "-B", "scripts/validate-contracts.py"], environment)
+    # `Cargo.lock` must already be current. This looks redundant next to the
+    # `--locked` on `cargo test` below, and is not: on 2026-08-07 `sha2` moved
+    # between two workspace members, `cargo test --workspace --locked` passed on
+    # three platforms with the stale lock, and `cargo metadata --locked` in the
+    # supply-chain job was the only thing that failed. Whatever the reason for
+    # that difference, the cheap check belongs in the gate rather than being
+    # discovered after a push.
+    #
+    # First, so a stale lock is reported before several minutes of compilation.
+    run([cargo, "metadata", "--format-version", "1", "--locked"], environment)
     run([cargo, "fmt", "--all", "--", "--check"], environment)
     run(
         [
