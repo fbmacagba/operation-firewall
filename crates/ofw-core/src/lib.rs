@@ -198,12 +198,13 @@ impl SupportedOperationProof {
             return BaselineRestriction::Deny;
         }
 
-        // Two deliberate tightenings of the published allow rows, neither of
-        // which the design doc's table states. Both narrow what may be allowed,
-        // and policy composition can only add restriction, so neither can be
+        // Three deliberate tightenings of the published allow rows, none of
+        // which the design doc's table states. All narrow what may be allowed,
+        // and policy composition can only add restriction, so none can be
         // undone downstream:
         //   - an allow baseline requires a low-consequence environment;
-        //   - an allow baseline requires a bounded blast radius.
+        //   - an allow baseline requires a bounded blast radius;
+        //   - an allow baseline requires no reachable execution surface.
         let low_consequence_environment = matches!(
             evidence.environment,
             EnvironmentClass::Local | EnvironmentClass::Development | EnvironmentClass::Test
@@ -213,11 +214,17 @@ impl SupportedOperationProof {
             BlastRadius::Single | BlastRadius::Bounded
         );
 
-        if low_consequence_environment && bounded {
-            // Bounded metadata/read with no external execution surface.
-            if matches!(evidence.effect, OperationEffect::Read)
-                && matches!(evidence.execution_surface, ExecutionSurface::None)
-            {
+        // No allow row survives a reachable execution surface. Hoisted out of
+        // the individual rows so a row added later cannot omit it: the
+        // condition belongs to "may be allowed at all", not to any one row.
+        // A command that consults repository-controlled configuration can name
+        // further programs to run whatever it does to the target it names, so
+        // this binds a write at least as tightly as a read.
+        let no_execution_surface = matches!(evidence.execution_surface, ExecutionSurface::None);
+
+        if low_consequence_environment && bounded && no_execution_surface {
+            // Bounded metadata/read.
+            if matches!(evidence.effect, OperationEffect::Read) {
                 return BaselineRestriction::Allow;
             }
             // Bounded reversible repository-local edit with complete targets.
@@ -543,6 +550,51 @@ mod tests {
         );
     }
 
+    /// The write allow row must demand the same absent execution surface the
+    /// read allow row demands.
+    ///
+    /// The asymmetry this pins is easy to reintroduce because it reads as
+    /// harmless: an edit is already constrained to be reversible and
+    /// repository-local, so requiring one more thing looks redundant. It is
+    /// not. The execution surface is not a property of the *edit*, it is a
+    /// property of the *command performing the edit* -- and a command that
+    /// consults repository-controlled configuration can name further programs
+    /// to run, whatever it does to the file it names. A write earns less
+    /// benefit of the doubt than a read, not more.
+    #[test]
+    fn red_first_witness_detects_a_write_allow_row_that_ignores_the_execution_surface() {
+        let edit_through_an_executing_command = OperationEvidence {
+            operation_kind: name("filesystem.write"),
+            effect: OperationEffect::Update,
+            execution_surface: ExecutionSurface::Present,
+            ..readable_evidence()
+        };
+
+        // Every other dimension is maximally favourable -- bounded, reversible,
+        // repository-local, local environment -- so the execution surface is
+        // the only thing standing between this and an allow.
+        assert_eq!(
+            proof(edit_through_an_executing_command.clone()).baseline(),
+            BaselineRestriction::Ask
+        );
+        // The same edit with no execution surface is still an allow, so the
+        // guard narrows exactly one thing and does not disable the row.
+        assert_eq!(
+            proof(OperationEvidence {
+                execution_surface: ExecutionSurface::None,
+                ..edit_through_an_executing_command.clone()
+            })
+            .baseline(),
+            BaselineRestriction::Allow
+        );
+        // The retained vulnerable row is the read row's guard omitted from the
+        // write row, which is what this crate shipped until 2026-08-07.
+        assert_eq!(
+            vulnerable_write_row_ignores_execution_surface(&edit_through_an_executing_command),
+            BaselineRestriction::Allow
+        );
+    }
+
     #[test]
     fn baseline_restriction_ordering_is_pinned() {
         // `decide` joins with `max`, which follows declaration order.
@@ -757,6 +809,36 @@ mod tests {
     ) -> DecisionOutcome {
         let _ = proof;
         vulnerable_no_restriction_means_allow(evaluation)
+    }
+
+    /// Retained red-first witness: the write allow row without the execution
+    /// surface guard the read allow row carries.
+    ///
+    /// Reproduced rather than delegated, because the defect was the *absence*
+    /// of a condition -- there is nothing to call that still has it.
+    fn vulnerable_write_row_ignores_execution_surface(
+        evidence: &OperationEvidence,
+    ) -> BaselineRestriction {
+        let low_consequence_environment = matches!(
+            evidence.environment,
+            EnvironmentClass::Local | EnvironmentClass::Development | EnvironmentClass::Test
+        );
+        let bounded = matches!(
+            evidence.blast_radius,
+            BlastRadius::Single | BlastRadius::Bounded
+        );
+        if low_consequence_environment
+            && bounded
+            && matches!(
+                evidence.effect,
+                OperationEffect::Create | OperationEffect::Update
+            )
+            && matches!(evidence.reversibility, Reversibility::Reversible)
+            && matches!(evidence.containment, Containment::RepositoryLocal)
+        {
+            return BaselineRestriction::Allow;
+        }
+        BaselineRestriction::Ask
     }
 
     /// Retained red-first witness: the baseline derivation with the allow rows
