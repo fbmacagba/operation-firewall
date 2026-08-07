@@ -1,4 +1,9 @@
 /target/
+# `fuzz/` is outside the workspace and so has its own build directory and lock.
+# Both appear the moment anything compiles it, which `scripts/verify.py` now
+# does on every run.
+/fuzz/target/
+/fuzz/Cargo.lock
 /dist/
 /coverage/
 /.tmp/

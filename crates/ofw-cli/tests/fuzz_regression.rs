@@ -19,6 +19,27 @@
 
 use std::path::{Path, PathBuf};
 
+/// The operation kinds this build interprets, pinned per grammar revision.
+///
+/// Written out rather than read from `ofw-intent`'s own table, because a pin
+/// that reads the thing it pins agrees with it always. An unrecognised
+/// revision yields an empty set, so a bump fails every supported seed until
+/// this list is updated — which is the intended way to be told.
+///
+/// This list existed before and went stale anyway: `git log` and `git diff`
+/// were added to the grammar while both copies of it still named only
+/// `status` and `rev-parse`. Nothing here caught it, because the corpus had no
+/// seed that classified as either new kind, and the nightly fuzz job found it
+/// instead — on a `git diff` the fuzzer generated in eight bytes. The corpus
+/// now carries those shapes, so the same drift reds on an ordinary
+/// `cargo test`.
+fn interpreted_kinds() -> &'static [&'static str] {
+    match ofw_intent::GRAMMAR_REVISION {
+        "1.1.0" => &["git.status", "git.rev_parse", "git.log", "git.diff"],
+        _ => &[],
+    }
+}
+
 fn corpus(target: &str) -> Vec<(PathBuf, Vec<u8>)> {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fuzz-corpus")
@@ -99,7 +120,7 @@ fn every_command_seed_terminates_and_classifies_within_the_subset() {
                 // harmless one.
                 let kind = candidate.operation_kind().as_str();
                 assert!(
-                    matches!(kind, "git.status" | "git.rev_parse"),
+                    interpreted_kinds().contains(&kind),
                     "{} classified as unexpected kind {kind}",
                     path.display()
                 );

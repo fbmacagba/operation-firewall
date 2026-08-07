@@ -132,6 +132,30 @@ sixteen cells, asserting that `Allow` is reachable from exactly one of them.
 Weakening `decide` so an indeterminate policy no longer short-circuits reds
 that test and no other, which is why it was written.
 
+**The nightly fuzz job earned its place on 2026-08-07**, by failing on the
+eight-byte input `git diff` hours after `git log` and `git diff` were added to
+the grammar. It was not a crash in the parser: the fuzz target carried its own
+copy of the interpreted-kind list, still naming only `status` and `rev-parse`,
+and nothing had updated it. `fuzz/` is excluded from the workspace, so every
+`--workspace` command in the local gate was blind to it.
+
+Three changes came out of that, and the third is the one that matters:
+
+- Both copies of the list — the fuzz target's and the stable replay's — are now
+  keyed on `GRAMMAR_REVISION`, with an unrecognised revision yielding an empty
+  set, so a bump fails loudly instead of drifting.
+- The corpus gained seeds for the new shapes, so the drift reds on an ordinary
+  `cargo test`. Confirmed by reproducing the CI failure locally before fixing
+  it.
+- `scripts/verify.py` now compiles the fuzz targets. That does not run them —
+  which needs nightly — but it catches the larger class of a target referring
+  to an API that moved underneath it. Verified load-bearing: breaking a target's
+  compile fails the gate.
+
+The lesson generalises past this incident. A pin duplicated in a place the gate
+cannot see is not a pin; it is a second copy that can disagree silently, and it
+disagreed for exactly as long as it took nightly to run.
+
 Fuzzing is present as of 2026-08-07: `fuzz/` holds libFuzzer targets for all
 three untrusted parsers (Codex envelope, policy bundle, shell tokenizer), run by
 a nightly-only CI job. Nightly is scoped to that job alone — `fuzz/` is excluded

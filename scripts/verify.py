@@ -84,6 +84,27 @@ def main() -> int:
         [cargo, "test", "--workspace", "--all-targets", "--locked"],
         environment,
     )
+    # `fuzz/` is excluded from the workspace so the 1.97.1 pin is not weakened
+    # to enable nightly-only tooling. The cost is that every `--workspace`
+    # command above is blind to it, and on 2026-08-07 that let a stale
+    # assertion ship: the fuzz targets still named an operation-kind list from
+    # before `git log` and `git diff` were interpreted, and nothing found out
+    # until the nightly job failed on the eight-byte input `git diff`.
+    #
+    # Compiling the targets here does not run them -- that genuinely needs
+    # nightly -- but it does catch the larger class, a target referring to an
+    # API that moved underneath it. The runtime half is covered by seeding the
+    # corpus, which `fuzz_regression.rs` replays on stable.
+    #
+    # No `--locked`: `fuzz/Cargo.lock` is not tracked, so requiring it to be
+    # current would fail on a clean checkout. That also means these targets are
+    # not part of the shipped artifact's dependency evidence, which is correct
+    # -- they are development tooling and nothing they pull in is linked into
+    # `ofw`.
+    run(
+        [cargo, "check", "--manifest-path", "fuzz/Cargo.toml", "--all-targets"],
+        environment,
+    )
     return 0
 
 
