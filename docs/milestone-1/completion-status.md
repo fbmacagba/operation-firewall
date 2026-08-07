@@ -1,0 +1,139 @@
+# Milestone 1 completion status
+
+Assessed 2026-08-07 against the eight completion criteria in
+[the Milestone 1 completion design](../superpowers/specs/2026-08-01-milestone-1-completion-design.md#completion-criteria).
+
+## The claim that is not available
+
+Before the criteria, the constraint that governs them. The approved design
+excludes **"production active-enforcement claims"** from Milestone 1 scope, and
+states that Milestone 1 artifacts
+
+> are development artifacts, not production enforcement releases. Signing and
+> verification mechanisms are exercised before Milestone 2 but no
+> active-protection claim is permitted.
+
+So "production ready" is not a state Milestone 1 can reach by definition, and no
+amount of work inside Milestone 1 makes it reachable. It requires Milestone 2:
+bound approvals, replay protection, pre-execution revalidation, and a verified
+live host integration. This document therefore reports how much of the
+prerequisite is done, not whether the claim can be made — it cannot.
+
+## Criteria
+
+| # | Criterion | Status |
+| --- | --- | --- |
+| 1 | Executable passing evidence for every included functional requirement | **Partial** |
+| 2 | Every unsupported or incomplete recognized mutation is `indeterminate` and the hook denies | **Met** |
+| 3 | Windows, Linux, macOS resolver matrices pass without assuming platform defaults | **Partial** |
+| 4 | Red-first, negative, abuse, property, fuzz, mutation, concurrency, deadline and performance gates pass | **Partial** |
+| 5 | No audit/debug/error fixture leaks canary secrets or raw sensitive payloads | **Met** |
+| 6 | The `NoRestriction` advisory is resolved by executable baseline-proof enforcement | **Met, review outstanding** |
+| 7 | Dependency, SBOM, reproducibility, compatibility, rollback and clean-room provenance evidence is current | **Partial** |
+| 8 | README and diagnostics state that approvals, replay protection, revalidation and production enforcement remain Milestone 2 | **Met** |
+
+### 1 — Functional evidence: partial
+
+Implemented with tests: typed contracts and strict v1 deserialization, monotonic
+policy evaluation, policy bundle loading and atomic activation, bounded Codex
+envelope parsing, Bash/apply_patch payload extraction, read-only Git intent
+interpretation, repository-scope target resolution, the built-in baseline and
+final composition, structurally redacted audit construction, and the CLI.
+
+Not implemented: audit persistence, path-operand resolution (`git log`/`show`/
+`diff` need revision and pathspec extraction), the apply-patch grammar, the
+PowerShell subset, the revalidation fingerprint, and a trusted-configuration
+file loader with ownership verification. `ofw doctor` reports each of these
+rather than implying coverage.
+
+### 2 — Unsupported and incomplete operations deny: met
+
+Every path converges on deny, and each stage reports how far it got:
+`COMMAND_NOT_LITERAL`, `OPERATION_INTERPRETATION_UNSUPPORTED`,
+`TRUSTED_CONFIGURATION_MISSING`, `TARGET_RESOLUTION_INDETERMINATE`,
+`POLICY_BUNDLE_INVALID`, `AUDIT_UNAVAILABLE_FOR_MUTATION`. The hook emits exit 2
+with empty stdout in every case, and `doctor` probes the installed command path
+to confirm it.
+
+### 3 — Resolver matrices: partial
+
+The resolver is one portable implementation over `std::fs::canonicalize`, which
+does call the platform's native API and does resolve symlinks and junctions. It
+is **not** the per-platform matrix the design requires: reparse-point,
+mount/volume identity, alternate-data-stream, per-directory case-sensitivity and
+Unicode-normalization evidence are not collected.
+
+Nothing assumes a platform default — anything that cannot be established is an
+error and an error is `indeterminate` — and CI runs the suite on all three
+platforms. But "passes on three platforms" is weaker than "declares and tests a
+support matrix per platform", and the gap is a `forbid(unsafe_code)` question as
+much as an effort one: Windows reparse and volume evidence needs platform
+bindings, which would need `unsafe` in this project's own crates.
+
+### 4 — Test gates: partial
+
+Present: 120 tests; 23 retained red-first witnesses; negative and abuse corpora;
+canary tests on the CLI streams, bundle errors and audit records; property-style
+monotonicity; deadline handling in the hook.
+
+Absent: fuzz targets (they need a nightly toolchain, which conflicts with the
+pinned 1.97.1 — an operator decision, not one to take silently), mutation
+testing, concurrency tests (no concurrent writer exists yet — audit persistence
+is where it will), and warm-path performance benchmarks against the design's
+p95 ≤ 25 ms target.
+
+Every guard added in this milestone was verified load-bearing by weakening it
+alone and confirming the matching test reds — not merely by the suite passing.
+
+### 5 — No canary leaks: met
+
+Redaction is structural rather than a scrubbing pass: `AuditEvent` has no field
+that can hold a payload. Every field is a compiled-in literal, a SHA-256 digest,
+a bounded operator-authored identifier, or a number. CLI reasons are all
+`&'static str`. Bundle errors carry no policy content, because `serde_json`'s
+own messages quote the input and only the classification crosses the boundary.
+Each is canary-tested across `Display`, `Debug` and serialized form.
+
+### 6 — The `NoRestriction` advisory: met, review outstanding
+
+Policy silence cannot reach an allow: allow requires a proof whose derived
+baseline is allow, and an absent proof is always `indeterminate`. The criterion
+also requires the resolution be **reviewed before orchestration is accepted**;
+that review has not happened. `EffectivePolicy::evaluate` also remains public,
+so nothing structurally forces a caller through `ofw_core::decide` — the CLI is
+the only caller, but that is convention rather than a type-level guarantee.
+
+### 7 — Supply-chain and provenance evidence: partial
+
+Done: [ADR 0004](../decisions/0004-vetted-serialization-and-digest-dependencies.md)
+records the mandated pre-download review; CI runs `cargo audit --deny warnings`,
+fails closed on any licence outside a reviewed allowlist, and generates a
+CycloneDX SBOM that is a pure function of `Cargo.lock` — regenerated twice and
+diffed, so it is usable as evidence of what shipped.
+
+Not done: reproducible **release** builds. The SBOM is reproducible; the binary
+is not yet built twice and compared. Rollback evidence and the compatibility
+matrix are documented as design intent but not exercised.
+
+### 8 — Honest README and diagnostics: met
+
+The README's status banner states the design's own prohibition rather than
+reading as modesty. `ofw doctor` reports `enforcement: not_active`,
+`audit_health: unhealthy`, per-component status, trusted-configuration
+provenance limits, policy scope-filtering limits, and why `hook_registration`
+stays `unconfirmed`. It was corrected twice this cycle — once for understating
+what shipped, once for overstating what was usable — and both directions are
+now covered by tests.
+
+## Open items that need a decision rather than effort
+
+- **Fuzz targets need a nightly toolchain**, which conflicts with the pinned
+  1.97.1. Pinning is a deliberate reproducibility property; adding a second
+  toolchain for fuzzing is an operator's call.
+- **Confirming the Codex allow wire shape** requires reading the installed
+  host's own files, which are outside this repository. The shape is currently
+  inferred from the documented deny form and is unreachable today, but it is a
+  guess in a security boundary and should not stay one.
+- **Per-platform resolver evidence needs `unsafe`** in this project's crates for
+  the Windows path, against a workspace-wide `forbid(unsafe_code)`. Either the
+  forbid narrows to specific crates or the evidence stays uncollected.

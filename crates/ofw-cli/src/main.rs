@@ -432,7 +432,10 @@ fn run_doctor() {
         .string("hook_registration", "unconfirmed")
         .string(
             "hook_registration_note",
-            "Confirming host registration means reading the host's own              configuration, which lives outside this repository. The probes              above confirm the installed command path behaves; they do not              confirm the host is configured to call it.",
+            "Confirming host registration means reading the host's own \
+             configuration, which lives outside this repository. The probes \
+             above confirm the installed command path behaves; they do not \
+             confirm the host is configured to call it.",
         )
         .string("effective_wire_behaviour", "every operation denies")
         .string(

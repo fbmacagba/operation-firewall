@@ -200,6 +200,7 @@ Graphite-first navigation is required for non-trivial cross-file work; follow [G
 - [Codex hook protocol research](docs/research/codex-hook-protocol.md)
 - [External review findings](docs/reviews/2026-07-30-aramid-findings.md)
 - [External review response](docs/reviews/2026-07-30-aramid-response.md)
+- [Milestone 1 completion status](docs/milestone-1/completion-status.md) — an honest per-criterion assessment, including what is not done
 
 ## Clean-room boundary
 
