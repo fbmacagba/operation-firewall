@@ -80,11 +80,31 @@ whole operation. Verified against the built binary, not only in tests —
 file outside the boundary denies, and an alternate-data-stream spelling is
 refused. `GRAMMAR_REVISION` moved to 1.1.0.
 
+The **revalidation fingerprint** (FR-013/FR-014) landed on 2026-08-07. The
+design places it in Milestone 1 scope — only approval binding and pre-execution
+invocation are Milestone 2 — and it carried the one required red-first witness
+that could not exist without it, "target-set change ignored during
+revalidation". Its target-set digest is length-prefixed rather than
+separator-joined, because a newline is a legal filename character on Unix and
+the two-element sets `["a\nb", "c"]` and `["a", "b\nc"]` otherwise produce
+identical bytes *and* identical counts — an approval for one would revalidate
+against the other. `revalidate` destructures the fingerprint, so a field added
+later cannot silently drop out of the comparison.
+
+A **trusted-configuration file loader** landed the same day, with its limits
+stated rather than implied: size and structure are verified, and on Unix that
+the file is not writable by group or others. **Ownership is not verified on any
+platform**, and on Windows no permission check runs at all — both need APIs
+unreachable under `forbid(unsafe_code)`. A named file that cannot be used is a
+hard stop and never falls back to the environment variables, because falling
+back would let anyone who can break the file downgrade the deployment to the
+loader with no checks. `doctor` reports which loader supplied the configuration
+and exactly what was checked.
+
 Not implemented: retention, revision operands (so `git show`, and `git log`
 against a revision, stay out of the subset), the apply-patch grammar, the
-PowerShell subset, the revalidation fingerprint, ownership/permission
-verification of the audit directory (per-platform, and the Windows path needs
-`unsafe`), and a trusted-configuration file loader. `ofw doctor` reports each
+PowerShell subset, and ownership/permission verification of the audit directory
+(per-platform, and the Windows path needs `unsafe`). `ofw doctor` reports each
 of these rather than implying coverage.
 
 ### 2 — Unsupported and incomplete operations deny: met
@@ -113,7 +133,7 @@ bindings, which would need `unsafe` in this project's own crates.
 
 ### 4 — Test gates: partial
 
-Present: **139 tests; 23 retained red-first witnesses**; negative and abuse
+Present: **151 tests; 26 retained red-first witnesses**; negative and abuse
 corpora; canary tests on the CLI streams, bundle errors and audit records;
 property-style monotonicity; deadline handling in the hook.
 
@@ -122,9 +142,9 @@ writing them, never carried forward. Earlier the same day this section claimed
 "120 tests; 23 witnesses" while a session handoff note claimed "139 tests; 24
 witnesses", and the true figure at that moment was **131 and 23** — two
 inherited counts, wrong in opposite directions, neither checked before being
-repeated. That the total has since genuinely reached 139 is a coincidence and
-not a vindication of the note. A stale count in a document whose whole purpose
-is honest reporting is a defect in the document.
+repeated. The total has since passed both figures honestly, which is not a
+vindication of either. A stale count in a document whose whole purpose is
+honest reporting is a defect in the document.
 
 The decision space is now covered exhaustively rather than by sampled cases:
 three baselines plus the no-proof case against all four policy outcomes,
@@ -170,8 +190,43 @@ every line parses independently, and none is lost or duplicated. Counting lines
 alone would not catch an interleaved write, so the assertion is on parseability
 and identity too.
 
-Absent: mutation testing, and warm-path performance benchmarks against the
-design's p95 ≤ 25 ms target.
+**Performance** is covered as of 2026-08-07. The design's budget is "ordinary
+warm-path assessment targets p95 at or below 25 ms", measured — it says
+explicitly — separately from process startup and cold-cache behaviour. So the
+test runs in process after a warm-up, on the most expensive command currently
+interpreted. Measured before the assertion was written: **median 1.05 ms, p95
+1.27 ms** on Windows, under a debug build, roughly twenty times under budget.
+Asserted against the published budget rather than the measured value plus a
+margin, because a ratchet tuned to today's number fails on a slower runner for
+no defect.
+
+**Mutation testing** runs as of 2026-08-07, as a CI-only job so nothing is
+installed on an operator's machine. It is **advisory** (`continue-on-error`)
+and criterion 4 therefore stays partial: a gate that cannot fail is not yet a
+gate. It should be flipped to blocking once the survivor list has been triaged
+once, and that has not happened.
+
+It justified itself on its first run. 220 mutants: 132 caught, **50 missed** —
+and the job reported *success*, because success on a `continue-on-error` job
+means only that it did not fail the build. Reading the report rather than the
+verdict found two survivors that were real:
+
+- **`&&` to `||` on the write allow row of the baseline.** Mutated, a create
+  that is only *recoverable* rather than cleanly reversible reaches `Allow`
+  instead of `Ask`. Every existing witness missed it because they varied effect
+  and reversibility together, which makes both sides of the mutated expression
+  false so the two forms agree. This is the row the execution-surface guard had
+  been added to hours earlier and reviewed by hand.
+- **`>` to `==` on the token-length bound**, which turns a bound into a single
+  forbidden value: only a token of exactly the limit is refused and everything
+  longer passes. The boundary was untested.
+
+Both are killed, verified by applying each mutation by hand. The score moved to
+**136 caught / 46 missed**. The remaining 46 are believed to be fail-safe
+(`>` becoming `>=` makes a bound stricter) or unobservable (a `Display::fmt`
+returning `Ok(())`), but **believed is the operative word** — they have not been
+triaged one by one, and that triage is what stands between this criterion and
+"met".
 
 Every guard added in this milestone was verified load-bearing by weakening it
 alone and confirming the matching test reds — not merely by the suite passing.
@@ -249,6 +304,26 @@ provenance limits, policy scope-filtering limits, and why `hook_registration`
 stays `unconfirmed`. It was corrected twice this cycle — once for understating
 what shipped, once for overstating what was usable — and both directions are
 now covered by tests.
+
+## The Milestone 2 design
+
+Drafted 2026-08-07 at the operator's direction and **not approved**:
+[the Milestone 2 approvals design](../superpowers/specs/2026-08-07-milestone-2-approvals-design.md).
+No code implements it. It exists because Milestone 1 was defensible only
+because its design was reviewed first, and approval and replay logic is where
+subtle flaws live.
+
+It maps ten attacks onto the mechanism that must stop each, and argues three
+points specifically: an approval binds to `fingerprint.digest()` and nothing
+else, because binding to a command string would authorise a *spelling* and two
+spellings can resolve to different files; redemption marks the replay store
+**before** returning allow, never after; and an unreadable replay store makes
+redemption indeterminate rather than allowed — which is the `NoRestriction`
+advisory's exact shape and will be tempting to soften the first time an
+operator is locked out by a full disk.
+
+Four questions are open, and the document says nothing should be built until
+two of them are answered.
 
 ## Open items that need a decision rather than effort
 
