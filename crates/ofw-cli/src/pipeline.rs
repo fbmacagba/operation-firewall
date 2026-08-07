@@ -418,6 +418,8 @@ fn interpret_and_resolve(command: &str, configuration: Option<&TrustedConfigurat
     let operation_kind = match candidate.operation_kind().as_str() {
         "git.status" => "git.status",
         "git.rev_parse" => "git.rev_parse",
+        "git.log" => "git.log",
+        "git.diff" => "git.diff",
         // Interpreted by a grammar this function has no literal for. Reporting
         // it as uninterpreted is the safe direction of the two.
         _ => return blocked_stage(INTERPRETATION_UNSUPPORTED, None),
@@ -457,11 +459,16 @@ const fn blocked_stage(reason: Reason, operation_kind: Option<&'static str>) -> 
 const fn resolution_reason(error: ResolutionError) -> Reason {
     match error {
         // No rule for these targets yet.
-        ResolutionError::OperationKindUnsupported
-        | ResolutionError::PathTargetsUnsupported
-        | ResolutionError::EffectUnsupported => TARGET_RESOLUTION_UNSUPPORTED,
-        // A rule that could not be applied to this filesystem.
-        ResolutionError::RepositoryBoundaryUnresolvable
+        ResolutionError::OperationKindUnsupported | ResolutionError::EffectUnsupported => {
+            TARGET_RESOLUTION_UNSUPPORTED
+        }
+        // A rule that could not be applied to this filesystem -- or, for
+        // `OperandsUnexpectedForKind`, two layers that disagree about what the
+        // operation even is. That is a defect rather than a missing feature,
+        // and "unsupported" would read as the latter.
+        ResolutionError::OperandsUnexpectedForKind
+        | ResolutionError::PathOperandUnresolvable
+        | ResolutionError::RepositoryBoundaryUnresolvable
         | ResolutionError::WorkingDirectoryUnresolvable
         | ResolutionError::NonUtf8Path
         | ResolutionError::PathTooLong
@@ -863,12 +870,62 @@ mod tests {
     /// stop agreeing -- but no test can exercise it, and asserting that some
     /// other reason came back would not be exercising it either.
     #[test]
-    fn both_interpreted_kinds_reach_a_proof() {
-        for command in ["git status", "git rev-parse --show-toplevel"] {
-            let assessment = assess_str(&bash(command), Some(&contained()));
-            assert!(assessment.proof_present, "{command} must be provable");
-            assert_eq!(assessment.outcome, DecisionOutcome::Ask);
+    fn every_interpreted_kind_reaches_a_proof() {
+        let configuration = contained();
+        let tracked = configuration.working_directory().join("tracked.txt");
+        match std::fs::write(&tracked, b"contents") {
+            Ok(()) => {}
+            Err(error) => unreachable!("test file must be writable: {error}"),
         }
+
+        for command in [
+            "git status",
+            "git rev-parse --show-toplevel",
+            "git log --oneline",
+            "git diff --stat",
+            // The path-scoped forms, which are the reason this list grew.
+            "git log -- tracked.txt",
+            "git diff --cached -- tracked.txt",
+        ] {
+            let assessment = assess_str(&bash(command), Some(&configuration));
+            assert!(assessment.proof_present, "{command} must be provable");
+            // Still `ask` and not `allow`: git carries an execution surface no
+            // argv can rule out, and naming a single file does not remove it.
+            assert_eq!(
+                assessment.outcome,
+                DecisionOutcome::Ask,
+                "{command} must settle at ask"
+            );
+        }
+    }
+
+    /// A pathspec pointing outside the boundary denies, on the same command
+    /// shape that is otherwise merely `ask`.
+    ///
+    /// This is the payoff of resolving operands at all: `git log -- <file>` is
+    /// an approval prompt when the file is inside the repository and a refusal
+    /// when it is not, decided on the canonical path rather than the spelling.
+    #[test]
+    fn a_pathspec_outside_the_boundary_is_denied() {
+        let configuration = contained();
+        let outside = directory("contained-outside");
+        let secret = outside.join("secret.txt");
+        match std::fs::write(&secret, b"secret") {
+            Ok(()) => {}
+            Err(error) => unreachable!("test file must be writable: {error}"),
+        }
+        let name = match outside.file_name() {
+            Some(name) => name.to_string_lossy().into_owned(),
+            None => unreachable!("test directory must have a file name"),
+        };
+
+        let assessment = assess_str(
+            &bash(&format!("git log -- ../../{name}/secret.txt")),
+            Some(&configuration),
+        );
+        assert!(assessment.proof_present, "the escape must still be proven");
+        assert_eq!(assessment.outcome, DecisionOutcome::Deny);
+        assert_eq!(assessment.reason.code, BASELINE_DENIED.code);
     }
 
     #[test]

@@ -32,20 +32,32 @@ use ofw_contracts::{NamespacedName, OperationEffect};
 ///
 /// Held at `1.0.0` through the 2026-08-07 change that moved `effect`,
 /// privilege and publication into the subcommand table. Judged deliberately
-/// rather than left silent: the recognized shapes are unchanged, and every
-/// value the table now states is the value that was previously produced, so no
-/// command is interpreted differently and no decision moves. The addition of
-/// `privilege_risk` and `publication_risk` widens what a candidate *reports*
-/// without changing what any recognized shape *means*. A reader holding a
-/// `1.0.0` proof would draw the same conclusion from either version.
+/// rather than left silent: the recognized shapes were unchanged, and every
+/// value the table stated was the value previously produced, so no command was
+/// interpreted differently and no decision moved.
+///
+/// Raised to `1.1.0` on 2026-08-07 for `git log` and `git diff`, which *do*
+/// widen what `interpret` recognizes — and, for the first time, introduce
+/// operands. A reader holding a `1.0.0` proof cannot assume a `1.1.0` proof
+/// covers the same ground, because a `1.1.0` proof may be about specific paths
+/// rather than about a whole repository.
 ///
 /// `interpreted_subset_is_pinned` pins the subset per revision, so a widening
-/// that does need a bump cannot reach green without one.
-pub const GRAMMAR_REVISION: &str = "1.0.0";
+/// cannot reach green without a bump and a bump cannot reach green without its
+/// subset written out.
+pub const GRAMMAR_REVISION: &str = "1.1.0";
 
 pub const MAX_COMMAND_BYTES: usize = 65_536;
 pub const MAX_TOKENS: usize = 512;
 pub const MAX_TOKEN_BYTES: usize = 4_096;
+
+/// How many pathspec operands one command may carry.
+///
+/// Bounded for the same reason the token count is: the resolver canonicalizes
+/// each one, which is a filesystem call per operand, and an interpreter that
+/// accepts an unbounded list lets a caller choose how much work a single hook
+/// invocation performs inside the host's deadline.
+pub const MAX_PATH_OPERANDS: usize = 64;
 
 /// Why a command string could not be reduced to literal tokens.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -195,6 +207,32 @@ pub enum PrivilegeRisk {
     Standard,
 }
 
+/// What operands a subcommand accepts, beyond its allowlisted flags.
+///
+/// # Why a separator is required
+///
+/// Git's own operand syntax is ambiguous by design: in `git log foo`, `foo` is
+/// a revision if a ref of that name exists, a path if a file of that name
+/// exists, and an error if both do. Git resolves this by consulting the ref
+/// store and the working tree. This crate can do neither — reading `.git`
+/// means reading repository-controlled state, and running git means executing
+/// the thing being adjudicated.
+///
+/// So the ambiguity is refused rather than guessed. Only the explicit
+/// `-- <pathspec>...` form is interpreted; any operand before the separator is
+/// unsupported, including one that is obviously a path. That rejects plenty of
+/// legitimate commands, which costs them a deny. Guessing wrong in the other
+/// direction would mean resolving a revision as though it were a path, or
+/// worse, treating a path as a revision and resolving nothing at all while
+/// still reporting a complete resolution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperandGrammar {
+    /// No operand of any kind. Every non-flag argument is unsupported.
+    NoOperands,
+    /// Pathspecs, and only following an explicit `--`.
+    PathspecsAfterSeparator,
+}
+
 /// Whether the operation moves repository content across a trust boundary.
 ///
 /// Separate from the execution surface because they fail differently: an
@@ -263,11 +301,24 @@ pub enum UnsupportedReason {
     GlobalOptionRejected,
     /// A git subcommand outside the interpreted subset.
     SubcommandUnsupported,
-    /// An argument not on the subcommand's allowlist, including any operand,
-    /// pathspec or revision -- target extraction is a later slice.
+    /// An argument not on the subcommand's allowlist. For a subcommand taking
+    /// pathspecs this also covers every operand *before* the `--` separator,
+    /// which is where a revision would appear: revisions are not interpreted.
     ArgumentNotAllowlisted,
     /// The same allowlisted flag appeared twice.
     ArgumentRepeated,
+    /// A `--` separator on a subcommand that accepts no operands.
+    SeparatorNotAccepted,
+    /// More pathspecs than [`MAX_PATH_OPERANDS`].
+    TooManyPathOperands,
+    /// A pathspec this crate will not treat as a plain relative path.
+    ///
+    /// Covers git's pathspec magic (`:(exclude)`, `:!`, `:/`, `:^`) and, by the
+    /// same rule, anything else containing a colon -- on Windows that is the
+    /// alternate-data-stream separator, and stream evidence is not collected.
+    /// An empty pathspec is refused too: git reads it as "everything", which is
+    /// the opposite of what an empty operand looks like it means.
+    PathspecUnsupported,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -306,6 +357,7 @@ struct SubcommandProfile {
     effect: OperationEffect,
     privilege: PrivilegeRisk,
     publication: PublicationRisk,
+    operands: OperandGrammar,
 }
 
 /// The interpreted subset, in full.
@@ -313,7 +365,7 @@ struct SubcommandProfile {
 /// `interpreted_subset_is_pinned` enumerates this table, so widening it fails a
 /// test that names the grammar revision -- a subcommand cannot be added without
 /// the addition being looked at.
-const INTERPRETED_SUBCOMMANDS: [SubcommandProfile; 2] = [
+const INTERPRETED_SUBCOMMANDS: [SubcommandProfile; 4] = [
     SubcommandProfile {
         subcommand: "status",
         kind: "git.status",
@@ -321,6 +373,7 @@ const INTERPRETED_SUBCOMMANDS: [SubcommandProfile; 2] = [
         effect: OperationEffect::Read,
         privilege: PrivilegeRisk::Standard,
         publication: PublicationRisk::Contained,
+        operands: OperandGrammar::NoOperands,
     },
     SubcommandProfile {
         subcommand: "rev-parse",
@@ -329,7 +382,53 @@ const INTERPRETED_SUBCOMMANDS: [SubcommandProfile; 2] = [
         effect: OperationEffect::Read,
         privilege: PrivilegeRisk::Standard,
         publication: PublicationRisk::Contained,
+        operands: OperandGrammar::NoOperands,
     },
+    SubcommandProfile {
+        subcommand: "log",
+        kind: "git.log",
+        allowed: &LOG_FLAGS,
+        effect: OperationEffect::Read,
+        privilege: PrivilegeRisk::Standard,
+        publication: PublicationRisk::Contained,
+        operands: OperandGrammar::PathspecsAfterSeparator,
+    },
+    SubcommandProfile {
+        subcommand: "diff",
+        kind: "git.diff",
+        allowed: &DIFF_FLAGS,
+        effect: OperationEffect::Read,
+        privilege: PrivilegeRisk::Standard,
+        publication: PublicationRisk::Contained,
+        operands: OperandGrammar::PathspecsAfterSeparator,
+    },
+];
+
+/// Flags accepted for `git log`. All are value-free output selectors.
+///
+/// `-p`/`--patch` is deliberately absent. Every allow row already requires an
+/// absent execution surface and git never has one, so the baseline is `ask`
+/// either way and this changes no decision — but patch output is the form that
+/// most directly engages `diff.*.textconv` and external diff drivers, and a
+/// flag allowlist that keeps the narrower set costs nothing to keep narrow.
+/// The same reasoning excludes `--format`/`--pretty`, whose values carry
+/// directives.
+const LOG_FLAGS: [&str; 5] = [
+    "--oneline",
+    "--stat",
+    "--name-only",
+    "--name-status",
+    "--no-color",
+];
+
+/// Flags accepted for `git diff`. Value-free, and `-p` excluded as above.
+const DIFF_FLAGS: [&str; 6] = [
+    "--stat",
+    "--name-only",
+    "--name-status",
+    "--cached",
+    "--staged",
+    "--no-color",
 ];
 
 /// Recognized git subcommands that this slice does not interpret.
@@ -337,9 +436,9 @@ const INTERPRETED_SUBCOMMANDS: [SubcommandProfile; 2] = [
 /// Naming them separately keeps "we know this command and have not done it
 /// yet" distinct from "we have never heard of this", which matters for
 /// diagnostics and for knowing what coverage is actually missing.
-const KNOWN_UNINTERPRETED_SUBCOMMANDS: [&str; 19] = [
-    "add", "branch", "checkout", "clean", "commit", "diff", "fetch", "log", "merge", "pull",
-    "push", "rebase", "reset", "restore", "rm", "show", "stash", "switch", "tag",
+const KNOWN_UNINTERPRETED_SUBCOMMANDS: [&str; 17] = [
+    "add", "branch", "checkout", "clean", "commit", "fetch", "merge", "pull", "push", "rebase",
+    "reset", "restore", "rm", "show", "stash", "switch", "tag",
 ];
 
 /// Classifies literal tokens as a recognized operation, or refuses.
@@ -371,7 +470,37 @@ pub fn classify(tokens: &[String]) -> Classification {
     };
 
     let mut seen: Vec<&str> = Vec::new();
+    let mut path_candidates: Vec<String> = Vec::new();
+    let mut separator_seen = false;
+
     for argument in arguments {
+        // Everything after `--` is a pathspec, including something that looks
+        // like a flag. That is git's rule and it is the safe one: treating a
+        // post-separator `--stat` as a flag would silently drop a file
+        // genuinely named `--stat` from the resolved target list.
+        if separator_seen {
+            if path_candidates.len() >= MAX_PATH_OPERANDS {
+                return Classification::Unsupported(UnsupportedReason::TooManyPathOperands);
+            }
+            if let Err(reason) = check_pathspec(argument) {
+                return Classification::Unsupported(reason);
+            }
+            path_candidates.push(argument.clone());
+            continue;
+        }
+
+        if argument == "--" {
+            match profile.operands {
+                OperandGrammar::NoOperands => {
+                    return Classification::Unsupported(UnsupportedReason::SeparatorNotAccepted);
+                }
+                OperandGrammar::PathspecsAfterSeparator => {
+                    separator_seen = true;
+                    continue;
+                }
+            }
+        }
+
         let Some(flag) = profile
             .allowed
             .iter()
@@ -403,8 +532,31 @@ pub fn classify(tokens: &[String]) -> Classification {
         execution_surface_risk: ExecutionSurfaceRisk::RepositoryConfigControlled,
         privilege_risk: profile.privilege,
         publication_risk: profile.publication,
-        path_candidates: Vec::new(),
+        path_candidates,
     }))
+}
+
+/// Whether one post-separator operand is a plain relative path this crate is
+/// willing to hand to the resolver.
+///
+/// Note what is *not* checked here: whether the path escapes the repository.
+/// That is deliberately not a syntax question. `../../etc/passwd` and a symlink
+/// named `docs` that points at `/etc` are the same problem, and only one of
+/// them is visible in the string. Escape is decided by the resolver, on
+/// canonical paths, by path component -- so this function does not try, and a
+/// traversal spelling is passed through to be caught where it can actually be
+/// caught.
+fn check_pathspec(spec: &str) -> Result<(), UnsupportedReason> {
+    if spec.is_empty() {
+        return Err(UnsupportedReason::PathspecUnsupported);
+    }
+    // Git's pathspec magic is a prefix (`:(exclude)x`, `:!x`, `:/`, `:^x`), but
+    // any colon is refused: on Windows `name:stream` addresses an alternate
+    // data stream, and this milestone collects no stream evidence.
+    if spec.contains(':') {
+        return Err(UnsupportedReason::PathspecUnsupported);
+    }
+    Ok(())
 }
 
 /// Tokenizes and classifies in one step.
@@ -417,8 +569,8 @@ pub fn interpret(command: &str) -> Result<Classification, ShellError> {
 mod tests {
     use super::{
         Classification, ExecutionSurfaceRisk, GRAMMAR_REVISION, INTERPRETED_SUBCOMMANDS,
-        MAX_COMMAND_BYTES, PrivilegeRisk, PublicationRisk, ShellError, UnsupportedReason, classify,
-        interpret, tokenize,
+        IntentCandidate, MAX_COMMAND_BYTES, MAX_PATH_OPERANDS, OperandGrammar, PrivilegeRisk,
+        PublicationRisk, ShellError, UnsupportedReason, classify, interpret, tokenize,
     };
     use ofw_contracts::OperationEffect;
 
@@ -458,18 +610,20 @@ mod tests {
                     profile.effect,
                     profile.privilege,
                     profile.publication,
+                    profile.operands,
                 )
             })
             .collect();
 
         let expected = match GRAMMAR_REVISION {
-            "1.0.0" => vec![
+            "1.1.0" => vec![
                 (
                     "status",
                     "git.status",
                     OperationEffect::Read,
                     PrivilegeRisk::Standard,
                     PublicationRisk::Contained,
+                    OperandGrammar::NoOperands,
                 ),
                 (
                     "rev-parse",
@@ -477,6 +631,23 @@ mod tests {
                     OperationEffect::Read,
                     PrivilegeRisk::Standard,
                     PublicationRisk::Contained,
+                    OperandGrammar::NoOperands,
+                ),
+                (
+                    "log",
+                    "git.log",
+                    OperationEffect::Read,
+                    PrivilegeRisk::Standard,
+                    PublicationRisk::Contained,
+                    OperandGrammar::PathspecsAfterSeparator,
+                ),
+                (
+                    "diff",
+                    "git.diff",
+                    OperationEffect::Read,
+                    PrivilegeRisk::Standard,
+                    PublicationRisk::Contained,
+                    OperandGrammar::PathspecsAfterSeparator,
                 ),
             ],
             other => unreachable!(
@@ -664,13 +835,43 @@ mod tests {
                 UnsupportedReason::GlobalOptionRejected,
             ),
             ("git push", UnsupportedReason::SubcommandUnsupported),
-            ("git log", UnsupportedReason::SubcommandUnsupported),
+            ("git commit", UnsupportedReason::SubcommandUnsupported),
             (
                 "git status --porcelain=v2",
                 UnsupportedReason::ArgumentNotAllowlisted,
             ),
             ("git status src/", UnsupportedReason::ArgumentNotAllowlisted),
             ("git status -s -s", UnsupportedReason::ArgumentRepeated),
+            // A subcommand taking no operands may not carry a separator
+            // either: `git status --` would otherwise read as an empty
+            // pathspec list and resolve as though it had been scoped.
+            ("git status --", UnsupportedReason::SeparatorNotAccepted),
+            // Revisions are not interpreted, so a pre-separator operand is
+            // refused even when a valid pathspec follows it.
+            (
+                "git log HEAD -- src/main.rs",
+                UnsupportedReason::ArgumentNotAllowlisted,
+            ),
+            // ...and the ambiguous bare form is refused outright rather than
+            // guessed at, which is the whole reason the separator is required.
+            (
+                "git log src/main.rs",
+                UnsupportedReason::ArgumentNotAllowlisted,
+            ),
+            (
+                "git diff --stat --stat",
+                UnsupportedReason::ArgumentRepeated,
+            ),
+            ("git log -- ''", UnsupportedReason::PathspecUnsupported),
+            (
+                "git log -- ':(exclude)src'",
+                UnsupportedReason::PathspecUnsupported,
+            ),
+            ("git log -- ':!src'", UnsupportedReason::PathspecUnsupported),
+            (
+                "git log -- 'notes.txt:hidden'",
+                UnsupportedReason::PathspecUnsupported,
+            ),
             ("git", UnsupportedReason::SubcommandMissing),
             ("ls", UnsupportedReason::ProgramUnsupported),
             ("/usr/bin/git status", UnsupportedReason::ProgramUnsupported),
@@ -682,6 +883,72 @@ mod tests {
                 "unexpected classification for {command}"
             );
         }
+    }
+
+    fn supported(command: &str) -> IntentCandidate {
+        match interpret(command) {
+            Ok(Classification::Supported(candidate)) => *candidate,
+            other => unreachable!("{command} must classify, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pathspecs_are_extracted_only_after_the_separator() {
+        // No operands at all: a whole-repository read, and the list is empty
+        // because there was nothing to extract -- not because extraction
+        // failed. The resolver distinguishes those two by the operation kind.
+        assert!(supported("git log").path_candidates().is_empty());
+        assert!(supported("git diff --stat").path_candidates().is_empty());
+
+        assert_eq!(
+            supported("git log -- src/main.rs").path_candidates(),
+            ["src/main.rs"]
+        );
+        assert_eq!(
+            supported("git diff --cached -- src/ docs/README.md").path_candidates(),
+            ["src/", "docs/README.md"]
+        );
+    }
+
+    /// After `--`, a flag-shaped operand is a path.
+    ///
+    /// Git's rule, and the safe one: reading a post-separator `--stat` as a
+    /// flag would drop a file genuinely named `--stat` from the resolved
+    /// target list, so the command would be adjudicated against fewer targets
+    /// than it actually touches.
+    #[test]
+    fn a_flag_shaped_operand_after_the_separator_is_a_path() {
+        assert_eq!(supported("git log -- --stat").path_candidates(), ["--stat"]);
+        assert_eq!(supported("git log -- --").path_candidates(), ["--"]);
+    }
+
+    /// Traversal spellings are passed through, not refused here.
+    ///
+    /// Escape is not a syntax question: `../../etc/passwd` and a symlink named
+    /// `docs` pointing at `/etc` are the same problem and only one is visible
+    /// in the string. The resolver decides containment on canonical paths, so
+    /// refusing traversal here would give a false impression of where the
+    /// control lives while catching only the obvious half.
+    #[test]
+    fn traversal_is_left_for_the_resolver_to_decide() {
+        assert_eq!(
+            supported("git log -- ../../etc/passwd").path_candidates(),
+            ["../../etc/passwd"]
+        );
+    }
+
+    #[test]
+    fn the_pathspec_count_is_bounded() {
+        let mut command = String::from("git log --");
+        for index in 0..=MAX_PATH_OPERANDS {
+            command.push_str(&format!(" f{index}"));
+        }
+        assert_eq!(
+            interpret(&command),
+            Ok(Classification::Unsupported(
+                UnsupportedReason::TooManyPathOperands
+            ))
+        );
     }
 
     /// Retained red-first witness: whitespace-only splitting.

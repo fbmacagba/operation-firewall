@@ -173,9 +173,18 @@ pub fn environment_from_label(label: &str) -> Option<EnvironmentClass> {
 pub enum ResolutionError {
     /// The operation kind has no declared target scope in this slice.
     OperationKindUnsupported,
-    /// The candidate carries extracted path operands. Resolving those is the
-    /// slice that introduces the first operand-taking subcommand.
-    PathTargetsUnsupported,
+    /// The candidate carries path operands for a kind whose grammar accepts
+    /// none. A contradiction between the two layers, and refusing is the only
+    /// safe reading: whichever is wrong, resolving under either assumption
+    /// produces a proof about targets that were not established.
+    OperandsUnexpectedForKind,
+    /// A path operand did not canonicalize.
+    ///
+    /// The whole operation fails rather than resolving the paths that did
+    /// work. A partial list would understate what the command touches, and
+    /// containment computed across it would describe a subset while reading as
+    /// though it described the operation.
+    PathOperandUnresolvable,
     /// The effect's reversibility is not derivable yet.
     EffectUnsupported,
     RepositoryBoundaryUnresolvable,
@@ -193,7 +202,10 @@ impl core::fmt::Display for ResolutionError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let message = match self {
             Self::OperationKindUnsupported => "operation kind has no declared target scope",
-            Self::PathTargetsUnsupported => "operation carries path operands that are not resolved",
+            Self::OperandsUnexpectedForKind => {
+                "operation kind accepts no operands but the candidate carries some"
+            }
+            Self::PathOperandUnresolvable => "a path operand could not be canonicalized",
             Self::EffectUnsupported => "operation effect has no derivable reversibility",
             Self::RepositoryBoundaryUnresolvable => {
                 "repository boundary could not be canonicalized"
@@ -218,10 +230,16 @@ enum TargetScope {
     /// The whole repository working tree, addressed through the trusted
     /// working directory.
     Repository,
+    /// A specific list of paths, each resolved against the trusted working
+    /// directory.
+    Paths,
 }
 
 /// The contract name for a whole repository working tree as a target.
 const REPOSITORY_TARGET_KIND: &str = "git.repository";
+
+/// The contract name for one named path inside a working tree.
+const PATH_TARGET_KIND: &str = "git.worktree_path";
 
 /// One resolved operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -262,14 +280,10 @@ pub fn resolve(
     candidate: &IntentCandidate,
     configuration: &TrustedConfiguration,
 ) -> Result<ResolvedTargets, ResolutionError> {
-    // An operand this crate has not resolved must never be silently dropped.
-    // Refusing outright costs the operation its proof, which denies; resolving
-    // around it would produce a proof about targets nobody looked at.
-    if !candidate.path_candidates().is_empty() {
-        return Err(ResolutionError::PathTargetsUnsupported);
-    }
-
-    let scope = target_scope(candidate.operation_kind().as_str())?;
+    let scope = target_scope(
+        candidate.operation_kind().as_str(),
+        candidate.path_candidates().len(),
+    )?;
 
     // Reversibility is derived from the effect, never accepted from anywhere.
     // Only `Read` is derivable while the interpreted subset is read-only;
@@ -298,6 +312,33 @@ pub fn resolve(
             // One repository working tree: bounded, not single. A repository
             // read observes every tracked path under it.
             (vec![working], vec![kind], BlastRadius::Bounded)
+        }
+        TargetScope::Paths => {
+            let working = canonicalize(&configuration.working_directory)
+                .ok_or(ResolutionError::WorkingDirectoryUnresolvable)?;
+            let kind = NamespacedName::new(PATH_TARGET_KIND)
+                .map_err(|_| ResolutionError::TargetKindUnrepresentable)?;
+
+            let mut resolved = Vec::with_capacity(candidate.path_candidates().len());
+            for operand in candidate.path_candidates() {
+                // Joined against the *trusted* working directory, never the
+                // envelope's. An absolute operand replaces the base entirely
+                // here, on every platform -- which is intended, because the
+                // result is then canonicalized and measured against the
+                // boundary like any other path. Escape is caught by
+                // containment, not by refusing to join.
+                let joined = working.join(operand);
+                let canonical =
+                    canonicalize(&joined).ok_or(ResolutionError::PathOperandUnresolvable)?;
+                resolved.push(canonical);
+            }
+
+            // Bounded rather than single even for one operand: a pathspec
+            // names a directory as readily as a file, and telling those apart
+            // needs a metadata call whose answer can change between deciding
+            // and executing. The narrower fact lives in `canonical_targets`
+            // and in the target kind, where it is exact.
+            (resolved, vec![kind], BlastRadius::Bounded)
         }
     };
 
@@ -340,18 +381,36 @@ pub fn resolve(
     })
 }
 
-/// What the operation's targets are, keyed on the normalized operation kind.
+/// What the operation's targets are, from the kind *and* the operand count.
 ///
-/// Keyed on the *kind*, and deliberately not on "the interpreter extracted no
-/// paths". Those two coincide exactly today, and they stop coinciding the
-/// moment an operand-taking subcommand is interpreted: a pathspec-extraction
-/// bug that dropped its operands would then resolve the entire working tree as
-/// a complete, repository-local target and hand back a proof covering paths
-/// nobody extracted. `red_first_witness_detects_scope_inferred_from_absent_paths`
-/// retains that inference and shows it doing exactly that.
-fn target_scope(operation_kind: &str) -> Result<TargetScope, ResolutionError> {
-    match operation_kind {
-        "git.status" | "git.rev_parse" => Ok(TargetScope::Repository),
+/// Both arguments are load-bearing, and the reason is the danger this function
+/// was written to avoid in the first place. Until `git log` and `git diff`
+/// landed, no interpreted subcommand took operands, so "the kind" and "nothing
+/// was extracted" gave the same answer everywhere and keying on the kind alone
+/// was safe. That is no longer true: `git log` legitimately means the whole
+/// repository with no operands and specific paths with them, so the count has
+/// to be read.
+///
+/// Reading the count is exactly what makes a dropped-operand bug dangerous —
+/// `git log -- src/x` whose extraction returned nothing becomes
+/// indistinguishable from `git log`, and resolves the entire working tree as a
+/// complete, repository-local target. That cannot be defended here, because
+/// both layers agree; it is defended in the grammar, by
+/// `pathspecs_are_extracted_only_after_the_separator`, and demonstrated
+/// end-to-end by `red_first_witness_detects_dropped_pathspecs`.
+///
+/// What this function *can* defend is the contradiction: a kind whose grammar
+/// accepts no operands arriving with some. That is refused rather than
+/// resolved under either layer's assumption.
+fn target_scope(
+    operation_kind: &str,
+    path_operands: usize,
+) -> Result<TargetScope, ResolutionError> {
+    match (operation_kind, path_operands) {
+        ("git.status" | "git.rev_parse", 0) => Ok(TargetScope::Repository),
+        ("git.status" | "git.rev_parse", _) => Err(ResolutionError::OperandsUnexpectedForKind),
+        ("git.log" | "git.diff", 0) => Ok(TargetScope::Repository),
+        ("git.log" | "git.diff", _) => Ok(TargetScope::Paths),
         _ => Err(ResolutionError::OperationKindUnsupported),
     }
 }
@@ -408,9 +467,13 @@ mod tests {
     }
 
     fn git_status() -> IntentCandidate {
-        match ofw_intent::interpret("git status") {
+        supported("git status")
+    }
+
+    fn supported(command: &str) -> IntentCandidate {
+        match ofw_intent::interpret(command) {
             Ok(Classification::Supported(candidate)) => *candidate,
-            other => unreachable!("git status must classify, got {other:?}"),
+            other => unreachable!("{command} must classify, got {other:?}"),
         }
     }
 
@@ -531,26 +594,154 @@ mod tests {
         );
     }
 
+    /// The danger the old scope witness guarded, now reachable for real.
+    ///
+    /// Before `git log` was interpreted this could only be shown against a
+    /// synthetic helper, because no interpreted subcommand took operands. It
+    /// is now a property of two real commands: dropping the operands of
+    /// `git log -- <file>` turns it into `git log`, which is a legitimate
+    /// whole-repository read. Nothing downstream can tell them apart -- both
+    /// are complete, both are repository-local, both are provable -- so the
+    /// resolved target silently widens from one file to the entire tree.
+    ///
+    /// This is why extraction is pinned in the grammar rather than inferred
+    /// from a count anywhere below it.
     #[test]
-    fn red_first_witness_detects_scope_inferred_from_absent_paths() {
-        // `git log` is a recognized subcommand that takes pathspecs. It is not
-        // interpreted yet, so nothing extracts its operands.
+    fn red_first_witness_detects_dropped_pathspecs() {
+        let boundary = directory("dropped");
+        let working = directory("dropped/worktree");
+        let file = working.join("tracked.txt");
+        match std::fs::write(&file, b"contents") {
+            Ok(()) => {}
+            Err(error) => unreachable!("test file must be writable: {error}"),
+        }
+        let configuration = configuration(working.clone(), boundary);
+
+        let scoped = match resolve(&supported("git log -- tracked.txt"), &configuration) {
+            Ok(resolved) => resolved,
+            Err(error) => unreachable!("a scoped log must resolve: {error}"),
+        };
         assert_eq!(
-            target_scope("git.log"),
+            scoped
+                .target_kinds()
+                .iter()
+                .map(NamespacedName::as_str)
+                .collect::<Vec<_>>(),
+            vec!["git.worktree_path"]
+        );
+        assert_eq!(scoped.canonical_targets().len(), 1);
+        assert!(scoped.canonical_targets()[0].ends_with("tracked.txt"));
+
+        // The same command with its operands dropped. Indistinguishable from
+        // an unscoped `git log`, and the target is now the whole working tree.
+        let widened = match resolve(&supported("git log"), &configuration) {
+            Ok(resolved) => resolved,
+            Err(error) => unreachable!("an unscoped log must resolve: {error}"),
+        };
+        assert_eq!(
+            widened
+                .target_kinds()
+                .iter()
+                .map(NamespacedName::as_str)
+                .collect::<Vec<_>>(),
+            vec!["git.repository"]
+        );
+        assert!(!widened.canonical_targets()[0].ends_with("tracked.txt"));
+        // Both are fully proven resolutions. Nothing about the widened one
+        // looks degraded, which is precisely the problem.
+        assert_eq!(
+            widened.context().target_completeness,
+            TargetCompleteness::Complete
+        );
+        assert_eq!(widened.context().containment, Containment::RepositoryLocal);
+    }
+
+    /// A kind whose grammar takes no operands must not resolve as a whole
+    /// repository when it somehow arrives carrying some.
+    #[test]
+    fn red_first_witness_detects_scope_ignoring_unexpected_operands() {
+        assert_eq!(
+            target_scope("git.status", 0),
+            Ok(TargetScope::Repository),
+            "the ordinary case is unaffected"
+        );
+        assert_eq!(
+            target_scope("git.status", 3),
+            Err(ResolutionError::OperandsUnexpectedForKind)
+        );
+        // `git log` reads the count rather than refusing it, so the two kinds
+        // are genuinely different and the arm is not dead.
+        assert_eq!(target_scope("git.log", 0), Ok(TargetScope::Repository));
+        assert_eq!(target_scope("git.log", 3), Ok(TargetScope::Paths));
+        assert_eq!(
+            target_scope("git.push", 0),
             Err(ResolutionError::OperationKindUnsupported)
         );
-        // The retained witness infers scope from an empty candidate list, and
-        // so reports the entire working tree as the target of a command whose
-        // pathspecs were never read.
+
+        // The retained witness keys on the kind alone. It reports a whole
+        // repository for a status carrying operands it cannot have, and
+        // collapses a path-scoped log into a repository read as well -- the
+        // same widening, from two different directions.
         assert_eq!(
-            vulnerable_scope_from_absent_paths("git.log", 0),
+            vulnerable_scope_ignores_operand_count("git.status", 3),
             Some(TargetScope::Repository)
         );
-        // It agrees with the real function wherever the real function decides,
-        // so the difference is exactly the inference and not a coincidence.
         assert_eq!(
-            vulnerable_scope_from_absent_paths("git.status", 0),
+            vulnerable_scope_ignores_operand_count("git.log", 3),
             Some(TargetScope::Repository)
+        );
+    }
+
+    /// A pathspec resolving outside the boundary is caught by containment, not
+    /// by refusing traversal syntax.
+    #[test]
+    fn a_pathspec_escaping_the_boundary_is_cross_boundary() {
+        let boundary = directory("escape");
+        let working = directory("escape/worktree");
+        let outside = directory("escape-outside");
+        let secret = outside.join("secret.txt");
+        match std::fs::write(&secret, b"secret") {
+            Ok(()) => {}
+            Err(error) => unreachable!("test file must be writable: {error}"),
+        }
+        let configuration = configuration(working, boundary);
+
+        // Spelled as a traversal, which the grammar deliberately passes
+        // through. Canonicalization is what discovers where it lands.
+        let command = format!(
+            "git log -- ../../{}/secret.txt",
+            match outside.file_name() {
+                Some(name) => name.to_string_lossy().into_owned(),
+                None => unreachable!("test directory must have a file name"),
+            }
+        );
+        let resolved = match resolve(&supported(&command), &configuration) {
+            Ok(resolved) => resolved,
+            Err(error) => unreachable!("the escaping path must resolve: {error}"),
+        };
+        assert_eq!(resolved.context().containment, Containment::CrossBoundary);
+    }
+
+    /// A pathspec that names nothing fails the whole resolution.
+    #[test]
+    fn an_unresolvable_pathspec_fails_the_whole_operation() {
+        let boundary = directory("absent-operand");
+        let working = directory("absent-operand/worktree");
+        let present = working.join("present.txt");
+        match std::fs::write(&present, b"here") {
+            Ok(()) => {}
+            Err(error) => unreachable!("test file must be writable: {error}"),
+        }
+        let configuration = configuration(working, boundary);
+
+        // One good operand and one that names nothing. Resolving the good one
+        // alone would report a complete resolution covering half the command.
+        assert_eq!(
+            resolve(
+                &supported("git log -- present.txt no-such-file.txt"),
+                &configuration
+            ),
+            Err(ResolutionError::PathOperandUnresolvable)
         );
     }
 
@@ -670,15 +861,21 @@ mod tests {
         }
     }
 
-    /// Retained red-first witness: target scope inferred from the absence of
-    /// extracted paths rather than from the operation kind.
-    fn vulnerable_scope_from_absent_paths(
+    /// Retained red-first witness: target scope keyed on the operation kind
+    /// alone, ignoring how many operands the candidate actually carries.
+    ///
+    /// This is the shape `target_scope` had while nothing took operands, kept
+    /// so the reason it stopped being safe stays visible.
+    fn vulnerable_scope_ignores_operand_count(
         operation_kind: &str,
-        path_candidate_count: usize,
+        path_operands: usize,
     ) -> Option<TargetScope> {
-        if path_candidate_count == 0 {
-            return Some(TargetScope::Repository);
+        let _ = path_operands;
+        match operation_kind {
+            "git.status" | "git.rev_parse" | "git.log" | "git.diff" => {
+                Some(TargetScope::Repository)
+            }
+            _ => None,
         }
-        target_scope(operation_kind).ok()
     }
 }
