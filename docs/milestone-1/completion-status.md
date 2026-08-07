@@ -117,9 +117,20 @@ fails closed on any licence outside a reviewed allowlist, and generates a
 CycloneDX SBOM that is a pure function of `Cargo.lock` — regenerated twice and
 diffed, so it is usable as evidence of what shipped.
 
-Not done: reproducible **release** builds. The SBOM is reproducible; the binary
-is not yet built twice and compared. Rollback evidence and the compatibility
-matrix are documented as design intent but not exercised.
+Partly done: **rebuild determinism**. CI builds the release binary twice and
+requires identical SHA-256, and publishes the digest alongside the SBOM. This
+catches a build embedding a timestamp, a random seed, or run-varying iteration
+order. Measured locally first rather than assumed — two Windows release builds
+of `ofw.exe` produced identical digests.
+
+Not done: **full reproducibility**, which is the stronger claim people hear.
+That needs identical bytes from a different absolute path and a different
+machine, requiring `--remap-path-prefix` and a controlled build environment.
+The CI step is named for what it checks rather than for the property it
+approximates, so a green run cannot be mistaken for the stronger claim.
+
+Also not done: rollback evidence and the compatibility matrix, which are
+documented as design intent but not exercised.
 
 ### 8 — Honest README and diagnostics: met
 

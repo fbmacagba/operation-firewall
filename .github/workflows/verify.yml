@@ -132,11 +132,37 @@ jobs:
           python -B scripts/supply-chain.py --sbom sbom.second.json
           diff sbom.cyclonedx.json sbom.second.json
 
-      - name: Publish the SBOM
+      - name: Confirm the release binary rebuilds identically
+        # Scope this carefully, because "reproducible build" is a claim people
+        # read as stronger than what is checked here. This checks *rebuild
+        # determinism*: the same source, same toolchain, same path, same
+        # machine, built twice, produces the same bytes. It catches a build
+        # that embeds a timestamp, a random seed, or iteration order that
+        # varies between runs.
+        #
+        # It is NOT the full reproducibility property. That requires the same
+        # bytes from a different absolute path and a different machine, which
+        # needs path remapping and a controlled environment. Recorded as a gap
+        # in docs/milestone-1/completion-status.md rather than implied away by
+        # a green check named "reproducible".
+        run: |
+          cargo build --release -p ofw-cli --locked
+          first=$(sha256sum target/release/ofw | cut -d' ' -f1)
+          rm -f target/release/ofw
+          cargo build --release -p ofw-cli --locked
+          second=$(sha256sum target/release/ofw | cut -d' ' -f1)
+          echo "first  $first"
+          echo "second $second"
+          test "$first" = "$second"
+          echo "$first  ofw" > release-digest.txt
+
+      - name: Publish the SBOM and release digest
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sbom
-          path: sbom.cyclonedx.json
+          path: |
+            sbom.cyclonedx.json
+            release-digest.txt
           if-no-files-found: error
 
   fuzz:
