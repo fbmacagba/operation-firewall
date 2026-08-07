@@ -569,8 +569,9 @@ pub fn interpret(command: &str) -> Result<Classification, ShellError> {
 mod tests {
     use super::{
         Classification, ExecutionSurfaceRisk, GRAMMAR_REVISION, INTERPRETED_SUBCOMMANDS,
-        IntentCandidate, MAX_COMMAND_BYTES, MAX_PATH_OPERANDS, OperandGrammar, PrivilegeRisk,
-        PublicationRisk, ShellError, UnsupportedReason, classify, interpret, tokenize,
+        IntentCandidate, MAX_COMMAND_BYTES, MAX_PATH_OPERANDS, MAX_TOKEN_BYTES, MAX_TOKENS,
+        OperandGrammar, PrivilegeRisk, PublicationRisk, ShellError, UnsupportedReason, classify,
+        interpret, tokenize,
     };
     use ofw_contracts::OperationEffect;
 
@@ -889,6 +890,53 @@ mod tests {
         match interpret(command) {
             Ok(Classification::Supported(candidate)) => *candidate,
             other => unreachable!("{command} must classify, got {other:?}"),
+        }
+    }
+
+    /// The token-length bound is enforced at its boundary.
+    ///
+    /// Added after a mutation run: replacing `>` with `==` in the length check
+    /// survived every existing test. Under that mutant only a token of
+    /// *exactly* `MAX_TOKEN_BYTES` is refused and everything longer is
+    /// accepted, which inverts a bound into a single forbidden value. Nothing
+    /// tested the boundary, so nothing noticed.
+    #[test]
+    fn the_token_length_bound_holds_at_its_boundary() {
+        let at_limit = format!("git {}", "a".repeat(MAX_TOKEN_BYTES));
+        assert!(
+            tokenize(&at_limit).is_ok(),
+            "a token exactly at the limit is allowed"
+        );
+
+        // One byte over is refused -- and so is far over, which is what the
+        // `==` mutant lets through.
+        for excess in [1, 2, MAX_TOKEN_BYTES] {
+            let over = format!("git {}", "a".repeat(MAX_TOKEN_BYTES + excess));
+            assert_eq!(
+                tokenize(&over),
+                Err(ShellError::TokenTooLong),
+                "a token {excess} bytes over the limit must be refused"
+            );
+        }
+    }
+
+    /// The token-count bound is enforced at its boundary.
+    #[test]
+    fn the_token_count_bound_holds_at_its_boundary() {
+        let words = |count: usize| {
+            let mut command = String::from("git");
+            for _ in 1..count {
+                command.push_str(" a");
+            }
+            command
+        };
+        assert!(tokenize(&words(MAX_TOKENS)).is_ok(), "exactly the limit");
+        for excess in [1, 2, 64] {
+            assert_eq!(
+                tokenize(&words(MAX_TOKENS + excess)),
+                Err(ShellError::TooManyTokens),
+                "{excess} tokens over the limit must be refused"
+            );
         }
     }
 

@@ -617,6 +617,68 @@ mod tests {
         );
     }
 
+    /// Each condition on the write allow row is load-bearing on its own.
+    ///
+    /// Added after a mutation run: replacing the first `&&` in that row with
+    /// `||` survived every existing test. The row reads
+    /// `(Create|Update) && Reversible && RepositoryLocal`, and the mutant reads
+    /// `(Create|Update) || (Reversible && RepositoryLocal)` — so a **create
+    /// that is only recoverable, not cleanly reversible**, reaches `Allow`
+    /// instead of `Ask`. Creating something that cannot be cleanly undone is
+    /// exactly the case an approval prompt exists for.
+    ///
+    /// The existing witnesses missed it because they varied the effect and the
+    /// reversibility together: a `Delete` + `Recoverable` case makes both sides
+    /// of the mutated expression false, so the two forms agree. Discriminating
+    /// needs the effect to match while the reversibility does not.
+    #[test]
+    fn every_condition_on_the_write_allow_row_is_required() {
+        let reversible_create = OperationEvidence {
+            operation_kind: name("filesystem.create"),
+            effect: OperationEffect::Create,
+            reversibility: Reversibility::Reversible,
+            execution_surface: ExecutionSurface::None,
+            ..readable_evidence()
+        };
+        // The row does fire when all three hold, so the assertions below are
+        // narrowing something real rather than testing an unreachable branch.
+        assert_eq!(
+            proof(reversible_create.clone()).baseline(),
+            BaselineRestriction::Allow
+        );
+
+        // Drop reversibility alone: this is the case the `||` mutant allows.
+        assert_eq!(
+            proof(OperationEvidence {
+                reversibility: Reversibility::Recoverable,
+                ..reversible_create.clone()
+            })
+            .baseline(),
+            BaselineRestriction::Ask,
+            "a create that is only recoverable must not reach allow"
+        );
+        // Drop the effect alone: a reversible, contained *delete* is still an
+        // ask, so the effect condition is doing work too.
+        assert_eq!(
+            proof(OperationEvidence {
+                operation_kind: name("filesystem.remove"),
+                effect: OperationEffect::Delete,
+                ..reversible_create.clone()
+            })
+            .baseline(),
+            BaselineRestriction::Ask
+        );
+        // Drop containment alone: cross-boundary is denied outright.
+        assert_eq!(
+            proof(OperationEvidence {
+                containment: Containment::CrossBoundary,
+                ..reversible_create
+            })
+            .baseline(),
+            BaselineRestriction::Deny
+        );
+    }
+
     #[test]
     fn baseline_restriction_ordering_is_pinned() {
         // `decide` joins with `max`, which follows declaration order.
