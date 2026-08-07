@@ -24,6 +24,7 @@ const WORKING_DIRECTORY_VARIABLE: &str = "OFW_WORKING_DIRECTORY";
 const REPOSITORY_BOUNDARY_VARIABLE: &str = "OFW_REPOSITORY_BOUNDARY";
 const ENVIRONMENT_VARIABLE: &str = "OFW_ENVIRONMENT";
 const POLICY_DIRECTORY_VARIABLE: &str = "OFW_POLICY_DIRECTORY";
+const AUDIT_DIRECTORY_VARIABLE: &str = "OFW_AUDIT_DIRECTORY";
 
 /// Writes one bundle file into a fresh policy directory and returns the
 /// environment entry pointing at it.
@@ -134,6 +135,7 @@ fn run_with(arguments: &[&str], input: &[u8], environment: &[(&'static str, Stri
         .env_remove(REPOSITORY_BOUNDARY_VARIABLE)
         .env_remove(ENVIRONMENT_VARIABLE)
         .env_remove(POLICY_DIRECTORY_VARIABLE)
+        .env_remove(AUDIT_DIRECTORY_VARIABLE)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -444,7 +446,7 @@ fn doctor_reports_what_is_implemented_without_overstating_it() {
         "\"enforcement\":\"not_active\"",
         "\"intent_interpretation\":\"read_only_git_subset\"",
         "\"audit_construction\":\"implemented\"",
-        "\"audit_persistence\":\"not_implemented\"",
+        "\"audit_persistence\":\"implemented_without_retention\"",
         "\"audit_health\":\"unhealthy\"",
         "\"target_resolution\":\"repository_scope_only\"",
         "\"approval_capabilities\":\"not_implemented\"",
@@ -725,4 +727,142 @@ fn the_allow_object_matches_the_confirmed_wire_shape() {
             "the allow object must not carry {forbidden}"
         );
     }
+}
+
+/// A decision reaches disk, and the record carries no payload.
+///
+/// The end-to-end form of the audit invariant: the binary writes a real record
+/// through a real sink, and the canary the agent put in its command is not in
+/// it. Asserting redaction only at the type level would miss a CLI that
+/// assembled a record from somewhere else.
+#[test]
+fn a_decision_is_recorded_and_the_record_carries_no_payload() {
+    const CANARY: &str = "CANARY_SECRET_a1b2c3d4e5";
+
+    let audit = directory("audit-trail");
+    let mut configured = contained();
+    configured.push((AUDIT_DIRECTORY_VARIABLE, text(&audit)));
+
+    let output = run_with(
+        &["assess"],
+        envelope("Bash", &format!("git push --token {CANARY}")).as_bytes(),
+        &configured,
+    );
+    assert_eq!(code(&output), EXIT_OK);
+
+    let segment = audit.join("audit.jsonl");
+    let contents = match std::fs::read_to_string(&segment) {
+        Ok(contents) => contents,
+        Err(error) => unreachable!("a record must have been written: {error}"),
+    };
+    let lines: Vec<&str> = contents.lines().filter(|line| !line.is_empty()).collect();
+    assert_eq!(lines.len(), 1, "one decision, one record: {contents}");
+    assert!(
+        !contents.contains(CANARY),
+        "the audit trail leaked the payload"
+    );
+    assert!(contents.contains("\"schema_version\":\"1.0\""));
+    assert!(contents.contains("\"algorithm\":\"sha256\""));
+
+    // A second decision appends rather than replacing.
+    let _ = run_with(
+        &["assess"],
+        envelope("Bash", "git status").as_bytes(),
+        &configured,
+    );
+    let after = match std::fs::read_to_string(&segment) {
+        Ok(contents) => contents,
+        Err(error) => unreachable!("the segment must still be readable: {error}"),
+    };
+    assert_eq!(
+        after.lines().filter(|line| !line.is_empty()).count(),
+        2,
+        "the sink must append, not truncate"
+    );
+}
+
+/// With a working sink, doctor reports a working sink.
+#[test]
+fn doctor_reports_audit_health_from_the_configured_sink() {
+    let audit = directory("audit-doctor");
+    let mut configured = contained();
+    configured.push((AUDIT_DIRECTORY_VARIABLE, text(&audit)));
+
+    let healthy = stdout(&run_with(&["doctor"], b"", &configured));
+    assert!(
+        healthy.contains("\"audit_health\":\"healthy\""),
+        "got: {healthy}"
+    );
+    assert!(healthy.contains("\"audit_configured\":true"));
+
+    // Unconfigured: no trail, and doctor says so rather than defaulting to
+    // something reassuring.
+    let unconfigured = stdout(&run_with(&["doctor"], b"", &contained()));
+    assert!(unconfigured.contains("\"audit_health\":\"unhealthy\""));
+    assert!(unconfigured.contains("\"audit_configured\":false"));
+}
+
+/// The audit trail may not live inside the repository it audits.
+#[test]
+fn an_audit_directory_inside_the_repository_is_unhealthy() {
+    let boundary = directory("audit-inside");
+    let inside = boundary.join("trail");
+    match std::fs::create_dir_all(&inside) {
+        Ok(()) => {}
+        Err(error) => unreachable!("test directory must be creatable: {error}"),
+    }
+    let mut configured = configuration(&boundary, &boundary);
+    configured.push((AUDIT_DIRECTORY_VARIABLE, text(&inside)));
+
+    let doctor = stdout(&run_with(&["doctor"], b"", &configured));
+    assert!(
+        doctor.contains("\"audit_health\":\"unhealthy\""),
+        "records inside the audited repository are writable by what they audit: {doctor}"
+    );
+    // Nothing was written there.
+    assert!(!inside.join("audit.jsonl").exists());
+}
+
+/// `doctor` must not write to the trail it reports on.
+///
+/// Its probes run the real hook command, and the child would inherit the audit
+/// directory. Two synthetic decisions per `doctor` run would land in the trail
+/// looking exactly like real ones -- and an audit log a reader cannot trust to
+/// contain only real decisions is not evidence. Found by running the binary by
+/// hand and noticing three records where two were expected.
+#[test]
+fn doctor_probes_do_not_write_to_the_audit_trail() {
+    let audit = directory("audit-probe-isolation");
+    let mut configured = contained();
+    configured.push((AUDIT_DIRECTORY_VARIABLE, text(&audit)));
+
+    let doctor = stdout(&run_with(&["doctor"], b"", &configured));
+    // The probes really did run -- otherwise this asserts nothing.
+    assert!(
+        doctor.contains("\"synthetic_deny\":\"passed\""),
+        "got: {doctor}"
+    );
+    assert!(doctor.contains("\"unusable_input_deny\":\"passed\""));
+
+    let segment = audit.join("audit.jsonl");
+    assert!(
+        !segment.exists(),
+        "doctor wrote {} probe records into the audit trail",
+        std::fs::read_to_string(&segment)
+            .map(|contents| contents.lines().count())
+            .unwrap_or(0)
+    );
+
+    // A real decision still lands, so the isolation is scoped to probes rather
+    // than having switched auditing off.
+    let _ = run_with(
+        &["assess"],
+        envelope("Bash", "git status").as_bytes(),
+        &configured,
+    );
+    let recorded = match std::fs::read_to_string(&segment) {
+        Ok(contents) => contents.lines().filter(|line| !line.is_empty()).count(),
+        Err(error) => unreachable!("a real decision must be recorded: {error}"),
+    };
+    assert_eq!(recorded, 1, "exactly the real decision");
 }

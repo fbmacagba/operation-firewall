@@ -23,7 +23,8 @@ use ofw_adapter_codex::{
     AdapterAssessment, AdapterError, EnvelopeErrorCode, ExtractedToolInput,
     INPUT_PROTOCOL_REVISION, ToolInputErrorCode, assess_supported_pre_tool_use,
 };
-use ofw_contracts::Version;
+use ofw_audit::Digest;
+use ofw_contracts::{Identifier, Version};
 use ofw_core::{
     DecisionOutcome, OperationEvidence, SupportedOperationProof, decide, evidence_from_intent,
 };
@@ -212,6 +213,56 @@ pub struct Assessment {
     pub operation_kind: Option<&'static str>,
     pub proof_present: bool,
     pub policy_outcome: &'static str,
+    /// Digests of the identities this decision concerned.
+    ///
+    /// Digests rather than the identities: `session_id` and `turn_id` are
+    /// agent-supplied strings, and an audit record that carried them raw would
+    /// be carrying attacker-influenced text into a log that is read later by a
+    /// human and parsed by tooling.
+    pub references: AuditReferences,
+}
+
+/// Payload-free references for one assessed operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuditReferences {
+    pub session: Digest,
+    pub invocation: Digest,
+    /// A bounded identifier derived from the invocation digest. Correlates
+    /// records without echoing anything the agent chose.
+    pub correlation: Identifier,
+}
+
+impl AuditReferences {
+    fn derive(input: &[u8], session_id: &str) -> Self {
+        let invocation = Digest::of(input);
+        // The contract's `id` pattern admits lowercase hex, so a digest prefix
+        // is a valid identifier and cannot fail validation.
+        let correlation = match Identifier::new(&invocation.value()[..32]) {
+            Ok(identifier) => identifier,
+            // A hex prefix always validates. If that ever stops being true the
+            // record still gets a usable identity rather than the operation
+            // failing over a diagnostic field.
+            Err(_) => match Identifier::new("unattributed") {
+                Ok(identifier) => identifier,
+                Err(_) => unreachable!("a compiled-in identifier must validate"),
+            },
+        };
+        Self {
+            session: Digest::of(session_id.as_bytes()),
+            invocation,
+            correlation,
+        }
+    }
+
+    fn unattributed() -> Self {
+        Self::derive(b"", "")
+    }
+
+    /// The references for a decision made before any input was read.
+    #[must_use]
+    pub fn unattributed_public() -> Self {
+        Self::unattributed()
+    }
 }
 
 /// How far one operation got before a decision was reached.
@@ -255,6 +306,7 @@ pub fn assess(input: &[u8], context: &AssessmentContext<'_>) -> Assessment {
                 operation_kind: None,
                 proof_present: false,
                 policy_outcome: "unhealthy",
+                references: AuditReferences::unattributed(),
             };
         }
         PolicyActivation::Healthy { policy, .. } => policy,
@@ -263,7 +315,13 @@ pub fn assess(input: &[u8], context: &AssessmentContext<'_>) -> Assessment {
     let extracted = match assess_supported_pre_tool_use(input) {
         AdapterAssessment::Extracted(extracted) => extracted,
         AdapterAssessment::Indeterminate(error) => {
-            return blocked(policy, adapter_reason(&error), None, None);
+            return blocked(
+                policy,
+                adapter_reason(&error),
+                None,
+                None,
+                AuditReferences::derive(input, ""),
+            );
         }
     };
 
@@ -281,6 +339,8 @@ pub fn assess(input: &[u8], context: &AssessmentContext<'_>) -> Assessment {
     // resolving against it would let the operation choose the boundary it is
     // measured against. `red_first_witness_detects_trusting_the_envelope_cwd`
     // retains a pipeline that does read it.
+    let references = AuditReferences::derive(input, extracted.envelope().session_id());
+
     let stage = match extracted.tool_input() {
         ExtractedToolInput::Bash(bash) => {
             interpret_and_resolve(bash.command(), context.configuration)
@@ -296,7 +356,7 @@ pub fn assess(input: &[u8], context: &AssessmentContext<'_>) -> Assessment {
         Stage::Blocked {
             reason,
             operation_kind,
-        } => blocked(policy, reason, tool_name, operation_kind),
+        } => blocked(policy, reason, tool_name, operation_kind, references),
         Stage::Proven {
             operation_kind,
             proof,
@@ -335,6 +395,7 @@ pub fn assess(input: &[u8], context: &AssessmentContext<'_>) -> Assessment {
                 operation_kind: Some(operation_kind),
                 proof_present: true,
                 policy_outcome: policy_outcome_name(&evaluation),
+                references,
             }
         }
     }
@@ -434,6 +495,7 @@ fn blocked(
     reason: Reason,
     tool_name: Option<&'static str>,
     operation_kind: Option<&'static str>,
+    references: AuditReferences,
 ) -> Assessment {
     let evaluation = evaluate(policy, None);
     Assessment {
@@ -448,6 +510,7 @@ fn blocked(
         operation_kind,
         proof_present: false,
         policy_outcome: policy_outcome_name(&evaluation),
+        references,
     }
 }
 

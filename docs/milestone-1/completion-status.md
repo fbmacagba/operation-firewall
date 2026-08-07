@@ -40,11 +40,20 @@ envelope parsing, Bash/apply_patch payload extraction, read-only Git intent
 interpretation, repository-scope target resolution, the built-in baseline and
 final composition, structurally redacted audit construction, and the CLI.
 
-Not implemented: audit persistence, path-operand resolution (`git log`/`show`/
-`diff` need revision and pathspec extraction), the apply-patch grammar, the
-PowerShell subset, the revalidation fingerprint, and a trusted-configuration
-file loader with ownership verification. `ofw doctor` reports each of these
-rather than implying coverage.
+Audit persistence landed on 2026-08-07: records append under an exclusive lock,
+segments rotate by atomic same-directory rename, and a damaged trailing record
+is quarantined on recovery with health reported degraded. The sink refuses an
+audit directory inside the repository it audits. **Retention is deliberately
+not implemented** — deleting closed segments is the one operation here that
+cannot be reviewed afterwards, and the cost of getting it wrong is unbounded
+against a cost of disk usage for not having it.
+
+Not implemented: retention, path-operand resolution (`git log`/`show`/`diff`
+need revision and pathspec extraction), the apply-patch grammar, the PowerShell
+subset, the revalidation fingerprint, ownership/permission verification of the
+audit directory (per-platform, and the Windows path needs `unsafe`), and a
+trusted-configuration file loader. `ofw doctor` reports each of these rather
+than implying coverage.
 
 ### 2 — Unsupported and incomplete operations deny: met
 
@@ -84,9 +93,14 @@ shipped artifact, is not weakened to enable it. Seeds are committed to
 `tests/fuzz-corpus/` and replayed by the **stable** suite, so a crash found once
 stays checked on every ordinary `cargo test` without nightly being installed.
 
-Absent: mutation testing, concurrency tests (no concurrent writer exists yet —
-audit persistence is where one will), and warm-path performance benchmarks
-against the design's p95 ≤ 25 ms target.
+Concurrency is covered as of 2026-08-07: eight threads appending twelve records
+each through the real filesystem lock, asserting that every record survives,
+every line parses independently, and none is lost or duplicated. Counting lines
+alone would not catch an interleaved write, so the assertion is on parseability
+and identity too.
+
+Absent: mutation testing, and warm-path performance benchmarks against the
+design's p95 ≤ 25 ms target.
 
 Every guard added in this milestone was verified load-bearing by weakening it
 alone and confirming the matching test reds — not merely by the suite passing.

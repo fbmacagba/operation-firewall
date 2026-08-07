@@ -85,6 +85,14 @@ pub fn run_deny_probes() -> (ProbeResult, ProbeResult) {
 fn probe_denies(executable: &std::path::Path, input: &[u8]) -> ProbeResult {
     let mut child = match Command::new(executable)
         .args(["hook", "codex-pre-tool-use"])
+        // A probe must not write to the evidence store. The child inherits
+        // this process's environment, so without this it would append two
+        // synthetic decisions to the audit trail on every `doctor` run --
+        // records that are indistinguishable from real ones to anyone reading
+        // the log later, which is precisely the confusion an audit trail
+        // exists to prevent. A diagnostic that contaminates the evidence it
+        // reports on is worse than no diagnostic.
+        .env_remove(crate::AUDIT_DIRECTORY_VARIABLE)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

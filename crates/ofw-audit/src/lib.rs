@@ -24,19 +24,22 @@
 //! way a reviewer sees. `red_first_witness_detects_raw_payload_in_an_event`
 //! retains the alternative shape and shows a command reaching the record.
 //!
-//! # What this crate does not do
+//! # Persistence
 //!
-//! Persistence. Construction and persistence are separated deliberately: the
-//! design's persistence requirements -- exclusive locking, size-based rotation
-//! by atomic rename, retention over closed segments only, quarantine of a
-//! partial final record on recovery -- are a slice of their own with their own
-//! dependency review for a locking crate. A half-built sink that the decision
-//! path already depends on would be worse than none, because the decision path
-//! would then depend on something whose failure modes are not yet handled.
+//! [`AuditSink`] appends records to JSONL segments under an exclusive lock,
+//! rotates by atomic same-directory rename, and quarantines a damaged trailing
+//! record on recovery. It does **not** implement retention: deleting closed
+//! segments is the one operation here that cannot be reviewed after the fact,
+//! and the cost of getting it wrong is unbounded against a cost of disk usage
+//! for not having it.
 //!
-//! Until it lands, [`AuditHealth::Unhealthy`] is the honest audit health for a
-//! deployment that requires an audit trail, and [`gate`] is what that health
-//! means for a decision.
+//! A deployment that configures no audit directory has no trail, and
+//! [`AuditHealth::Unhealthy`] is the honest health for it. [`gate`] is what
+//! that health means for a decision.
+
+mod sink;
+
+pub use sink::{AuditSink, MAX_RECORD_BYTES, MAX_SEGMENT_BYTES, SinkError, read_segment};
 
 use ofw_contracts::{EnvironmentClass, Identifier, NamespacedName, OperationEffect};
 use serde::Serialize;

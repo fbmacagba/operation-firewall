@@ -20,6 +20,7 @@
 //! or interrupted stdout object would be malformed, and malformed fails open;
 //! an exit code cannot be partially written.
 
+mod audit;
 mod json;
 mod pipeline;
 mod policy;
@@ -57,6 +58,10 @@ const ENVIRONMENT_VARIABLE: &str = "OFW_ENVIRONMENT";
 /// absence changes nothing. A deployment that configures one and cannot load
 /// it is unhealthy and denies.
 const POLICY_DIRECTORY_VARIABLE: &str = "OFW_POLICY_DIRECTORY";
+
+/// Optional. Absent means no audit trail, which is `unhealthy` and refuses
+/// mutations -- applied rather than warned about.
+pub(crate) const AUDIT_DIRECTORY_VARIABLE: &str = "OFW_AUDIT_DIRECTORY";
 
 const EXIT_OK: i32 = 0;
 pub(crate) const EXIT_DENY: i32 = 2;
@@ -129,15 +134,26 @@ fn run_hook(rest: &[&str]) {
     let assessment = match panic::catch_unwind(|| {
         let configuration = trusted_configuration();
         let policy = policy_activation();
+        let (sink, health) = open_audit(configuration.as_ref());
         let input = read_bounded_stdin();
         input.map(|bytes| {
-            pipeline::assess(
+            let assessment = pipeline::assess(
                 &bytes,
                 &pipeline::AssessmentContext {
                     configuration: configuration.as_ref(),
                     policy: &policy,
                 },
-            )
+            );
+            // Record before the process exits. A decision that was made and
+            // not recorded is exactly what the audit health rule exists to
+            // prevent, and every path below this exits immediately.
+            let environment = configuration
+                .as_ref()
+                .map_or(ofw_contracts::EnvironmentClass::Unknown, |configuration| {
+                    configuration.environment()
+                });
+            let _ = audit::record(sink.as_ref(), &assessment, environment, health);
+            assessment
         })
     }) {
         Ok(Ok(assessment)) => assessment,
@@ -254,6 +270,35 @@ fn trusted_configuration() -> Option<TrustedConfiguration> {
     .ok()
 }
 
+/// The configured audit directory, if any.
+fn audit_directory() -> Option<PathBuf> {
+    std::env::var_os(AUDIT_DIRECTORY_VARIABLE).map(PathBuf::from)
+}
+
+/// Opens the audit sink against the configured directory and boundary.
+fn open_audit(
+    configuration: Option<&TrustedConfiguration>,
+) -> (Option<ofw_audit::AuditSink>, ofw_audit::AuditHealth) {
+    let directory = audit_directory();
+    audit::open_sink(
+        directory.as_deref(),
+        configuration.map(TrustedConfiguration::repository_boundary),
+    )
+}
+
+fn doctor_audit_health() -> ofw_audit::AuditHealth {
+    open_audit(trusted_configuration().as_ref()).1
+}
+
+const fn audit_health_name(health: ofw_audit::AuditHealth) -> &'static str {
+    match health {
+        ofw_audit::AuditHealth::Healthy => "healthy",
+        ofw_audit::AuditHealth::Degraded => "degraded",
+        ofw_audit::AuditHealth::Unhealthy => "unhealthy",
+        ofw_audit::AuditHealth::Unknown => "unknown",
+    }
+}
+
 /// Activates supplied policy from the configured location, if there is one.
 fn policy_activation() -> PolicyActivation {
     match std::env::var_os(POLICY_DIRECTORY_VARIABLE) {
@@ -265,18 +310,29 @@ fn policy_activation() -> PolicyActivation {
 fn run_assess() {
     let configuration = trusted_configuration();
     let activation = policy_activation();
+    let (sink, health) = open_audit(configuration.as_ref());
     let assessment = match read_bounded_stdin() {
-        Ok(input) => pipeline::assess(
-            &input,
-            &pipeline::AssessmentContext {
-                configuration: configuration.as_ref(),
-                policy: &activation,
-            },
-        ),
+        Ok(input) => {
+            let assessment = pipeline::assess(
+                &input,
+                &pipeline::AssessmentContext {
+                    configuration: configuration.as_ref(),
+                    policy: &activation,
+                },
+            );
+            let environment = configuration
+                .as_ref()
+                .map_or(ofw_contracts::EnvironmentClass::Unknown, |configuration| {
+                    configuration.environment()
+                });
+            let _ = audit::record(sink.as_ref(), &assessment, environment, health);
+            assessment
+        }
         Err(reason) => Assessment {
             outcome: DecisionOutcome::Indeterminate,
             reason,
             audit_health: "not_applicable",
+            references: pipeline::AuditReferences::unattributed_public(),
             tool_name: None,
             operation_kind: None,
             proof_present: false,
@@ -331,7 +387,7 @@ fn run_doctor() {
         .string("target_resolution", "repository_scope_only")
         .string("policy_bundle_loading", "implemented")
         .string("audit_construction", "implemented")
-        .string("audit_persistence", "not_implemented")
+        .string("audit_persistence", "implemented_without_retention")
         .string("approval_capabilities", "not_implemented");
 
     let activation = policy_activation();
@@ -422,14 +478,18 @@ fn run_doctor() {
         )
         .strings("provable_operations", &["git.status", "git.rev_parse"])
         .string("enforcement", "not_active")
-        // There is no sink, so there is no audit trail. Reported rather than
-        // assumed: this is what makes a mutation refuse today.
-        .string("audit_health", "unhealthy")
+        // Measured by opening the configured sink, not assumed. Without a
+        // configured directory there is no trail, and that is what makes a
+        // mutation refuse.
+        .string("audit_health", audit_health_name(doctor_audit_health()))
+        .boolean("audit_configured", audit_directory().is_some())
         .string(
             "audit_note",
-            "Audit events are constructed and redacted, but not persisted. \
-             Every state-changing operation is therefore indeterminate; a \
-             proven read continues with degraded health.",
+            "Records are appended under an exclusive lock and rotated by \
+             atomic rename; a damaged trailing record is quarantined on \
+             recovery and reported as degraded. Retention is deliberately not \
+             implemented -- deleting audit evidence is the one operation here \
+             that cannot be reviewed afterwards.",
         )
         .object("hook_probes", probes)
         .string("hook_registration", "unconfirmed")
