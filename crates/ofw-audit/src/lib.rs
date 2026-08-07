@@ -43,7 +43,6 @@ pub use sink::{AuditSink, MAX_RECORD_BYTES, MAX_SEGMENT_BYTES, SinkError, read_s
 
 use ofw_contracts::{EnvironmentClass, Identifier, NamespacedName, OperationEffect};
 use serde::Serialize;
-use sha2::{Digest as _, Sha256};
 
 /// The audit contract revision this crate emits.
 pub const SCHEMA_VERSION: &str = "1.0";
@@ -60,45 +59,16 @@ const MAX_DETERMINING_RULE_REFS: usize = 256;
 
 /// A SHA-256 digest.
 ///
-/// The only way a variable-length input reaches an audit record. A digest lets
-/// a reader confirm that two records concern the same thing without the record
-/// containing the thing.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct Digest {
-    algorithm: &'static str,
-    value: String,
-}
-
-impl Digest {
-    #[must_use]
-    pub fn of(bytes: &[u8]) -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(bytes);
-        let output = hasher.finalize();
-        let mut value = String::with_capacity(64);
-        for byte in output {
-            // Lowercase hex, matching the contract's `^[0-9a-f]{64}$`.
-            value.push(hex_nibble(byte >> 4));
-            value.push(hex_nibble(byte & 0x0f));
-        }
-        Self {
-            algorithm: "sha256",
-            value,
-        }
-    }
-
-    #[must_use]
-    pub fn value(&self) -> &str {
-        &self.value
-    }
-}
-
-const fn hex_nibble(value: u8) -> char {
-    match value {
-        0..=9 => (b'0' + value) as char,
-        _ => (b'a' + value - 10) as char,
-    }
-}
+/// Re-exported rather than defined here. It lives in `ofw-contracts` because
+/// it is not an audit concept: the resolver's revalidation fingerprint needs
+/// the same primitive, and `ofw-resolve` cannot depend on this crate without
+/// inverting the layering. Re-exporting keeps `ofw_audit::Digest` working for
+/// every existing caller.
+///
+/// Within an audit record it remains the only way a variable-length input
+/// reaches the log: a digest lets a reader confirm that two records concern the
+/// same thing without the record containing the thing.
+pub use ofw_contracts::Digest;
 
 /// Component health, per the v1 contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]

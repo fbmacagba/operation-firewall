@@ -37,7 +37,7 @@
 use std::path::{Path, PathBuf};
 
 use ofw_contracts::{
-    BlastRadius, EnvironmentClass, NamespacedName, OperationEffect, Reversibility,
+    BlastRadius, Digest, EnvironmentClass, NamespacedName, OperationEffect, Reversibility, Version,
 };
 use ofw_core::{Containment, ResolvedContext, TargetCompleteness};
 use ofw_intent::IntentCandidate;
@@ -241,11 +241,153 @@ const REPOSITORY_TARGET_KIND: &str = "git.repository";
 /// The contract name for one named path inside a working tree.
 const PATH_TARGET_KIND: &str = "git.worktree_path";
 
+/// The revalidation contract revision this crate emits.
+pub const FINGERPRINT_SCHEMA_VERSION: &str = "1.0";
+
+/// A bounded identity for exactly what a decision was made about.
+///
+/// Milestone 2 binds an approval to one of these and recomputes it immediately
+/// before execution; this milestone produces it and compares it. The property
+/// it exists to provide is that **any change to what the operation would touch
+/// yields a different fingerprint**, so an approval granted for one target set
+/// cannot be redeemed against another.
+///
+/// It carries digests rather than paths for the same reason an audit record
+/// does: a fingerprint may be stored, logged or handed to another process, and
+/// none of those should distribute the filesystem layout of the repository.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RevalidationFingerprint {
+    schema_version: &'static str,
+    operation_kind: NamespacedName,
+    grammar_revision: Version,
+    repository_boundary: Digest,
+    target_count: usize,
+    target_set: Digest,
+}
+
+impl RevalidationFingerprint {
+    #[must_use]
+    pub fn operation_kind(&self) -> &NamespacedName {
+        &self.operation_kind
+    }
+
+    #[must_use]
+    pub const fn target_count(&self) -> usize {
+        self.target_count
+    }
+
+    #[must_use]
+    pub const fn target_set(&self) -> &Digest {
+        &self.target_set
+    }
+
+    /// A single digest over the whole fingerprint.
+    ///
+    /// What Milestone 2 binds an approval to. Built with the same
+    /// length-prefixed framing as the target set, so no two distinct
+    /// fingerprints can produce one value.
+    #[must_use]
+    pub fn digest(&self) -> Digest {
+        let mut framed = Vec::new();
+        for field in [
+            self.schema_version,
+            self.operation_kind.as_str(),
+            self.grammar_revision.as_str(),
+            self.repository_boundary.value(),
+        ] {
+            frame(&mut framed, field.as_bytes());
+        }
+        frame(&mut framed, &self.target_count.to_le_bytes());
+        frame(&mut framed, self.target_set.value().as_bytes());
+        Digest::of(&framed)
+    }
+}
+
+/// What differs between two fingerprints, if anything.
+///
+/// Reported rather than collapsed to a boolean because the answers mean
+/// different things to an operator: a changed target set is the filesystem
+/// moving under a decision, while a changed grammar revision means the decision
+/// was made by a different interpreter than the one about to act on it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FingerprintChange {
+    SchemaVersion,
+    OperationKind,
+    GrammarRevision,
+    RepositoryBoundary,
+    TargetCount,
+    TargetSet,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Revalidation {
+    Unchanged,
+    Changed(FingerprintChange),
+}
+
+/// Compares a recorded fingerprint against one computed now.
+///
+/// Every field is compared. `Unchanged` is returned only when all of them
+/// match, so adding a field to [`RevalidationFingerprint`] without adding it
+/// here would be a silent weakening — which is why the struct is destructured
+/// rather than field-accessed: a new field makes this function stop compiling.
+#[must_use]
+pub fn revalidate(
+    recorded: &RevalidationFingerprint,
+    current: &RevalidationFingerprint,
+) -> Revalidation {
+    let RevalidationFingerprint {
+        schema_version,
+        operation_kind,
+        grammar_revision,
+        repository_boundary,
+        target_count,
+        target_set,
+    } = recorded;
+
+    if *schema_version != current.schema_version {
+        return Revalidation::Changed(FingerprintChange::SchemaVersion);
+    }
+    if *operation_kind != current.operation_kind {
+        return Revalidation::Changed(FingerprintChange::OperationKind);
+    }
+    if *grammar_revision != current.grammar_revision {
+        return Revalidation::Changed(FingerprintChange::GrammarRevision);
+    }
+    if *repository_boundary != current.repository_boundary {
+        return Revalidation::Changed(FingerprintChange::RepositoryBoundary);
+    }
+    // Checked before the set digest so a target appearing twice is reported as
+    // a count change rather than as an opaque set change.
+    if *target_count != current.target_count {
+        return Revalidation::Changed(FingerprintChange::TargetCount);
+    }
+    if *target_set != current.target_set {
+        return Revalidation::Changed(FingerprintChange::TargetSet);
+    }
+    Revalidation::Unchanged
+}
+
+/// Appends one length-prefixed field to a digest input.
+///
+/// The framing is the whole point. Joining variable-length values with a
+/// separator is ambiguous whenever a value may contain the separator, and a
+/// filesystem path may contain almost anything — a newline is a legal filename
+/// character on Unix. Under newline joining the two-target sets
+/// `["a\nb", "c"]` and `["a", "b\nc"]` produce identical bytes *and* identical
+/// counts, so an approval for one would revalidate against the other.
+/// `red_first_witness_detects_ambiguous_target_framing` retains that collision.
+fn frame(output: &mut Vec<u8>, field: &[u8]) {
+    output.extend_from_slice(&(field.len() as u64).to_le_bytes());
+    output.extend_from_slice(field);
+}
+
 /// One resolved operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedTargets {
     context: ResolvedContext,
     canonical_targets: Vec<String>,
+    canonical_boundary: String,
     target_kinds: Vec<NamespacedName>,
 }
 
@@ -272,6 +414,38 @@ impl ResolvedTargets {
     #[must_use]
     pub fn target_kinds(&self) -> &[NamespacedName] {
         &self.target_kinds
+    }
+
+    /// Builds the revalidation fingerprint for this resolution.
+    ///
+    /// The target set is **sorted** before framing, so the fingerprint is a
+    /// property of which paths are involved and not of the order the operand
+    /// list happened to arrive in. Reordering the same pathspecs is genuinely
+    /// not a change, and treating it as one would make revalidation fail for a
+    /// reason no operator could act on. Duplicates survive sorting and are
+    /// counted, so `[a, a]` and `[a]` stay distinct.
+    #[must_use]
+    pub fn fingerprint(
+        &self,
+        operation_kind: &NamespacedName,
+        grammar_revision: &Version,
+    ) -> RevalidationFingerprint {
+        let mut sorted: Vec<&String> = self.canonical_targets.iter().collect();
+        sorted.sort();
+
+        let mut framed = Vec::new();
+        for target in &sorted {
+            frame(&mut framed, target.as_bytes());
+        }
+
+        RevalidationFingerprint {
+            schema_version: FINGERPRINT_SCHEMA_VERSION,
+            operation_kind: operation_kind.clone(),
+            grammar_revision: grammar_revision.clone(),
+            repository_boundary: Digest::of(self.canonical_boundary.as_bytes()),
+            target_count: self.canonical_targets.len(),
+            target_set: Digest::of(&framed),
+        }
     }
 }
 
@@ -368,6 +542,8 @@ pub fn resolve(
     // nothing.
     let target_completeness = TargetCompleteness::Complete;
 
+    let canonical_boundary = bounded_utf8(&boundary)?;
+
     Ok(ResolvedTargets {
         context: ResolvedContext {
             containment,
@@ -377,6 +553,7 @@ pub fn resolve(
             reversibility,
         },
         canonical_targets,
+        canonical_boundary,
         target_kinds,
     })
 }
@@ -448,8 +625,9 @@ mod tests {
     use ofw_intent::{Classification, IntentCandidate};
 
     use super::{
-        ConfigurationError, MAX_PATH_BYTES, ResolutionError, TargetScope, TrustedConfiguration,
-        bounded_utf8, environment_from_label, resolve, target_scope,
+        ConfigurationError, Digest, FingerprintChange, MAX_PATH_BYTES, ResolutionError,
+        Revalidation, RevalidationFingerprint, TargetScope, TrustedConfiguration, bounded_utf8,
+        environment_from_label, frame, resolve, revalidate, target_scope,
     };
 
     /// Creates a real directory under the system temporary directory.
@@ -859,6 +1037,161 @@ mod tests {
         } else {
             Containment::CrossBoundary
         }
+    }
+
+    fn fingerprint_for(
+        command: &str,
+        configuration: &TrustedConfiguration,
+    ) -> RevalidationFingerprint {
+        let candidate = supported(command);
+        let resolved = match resolve(&candidate, configuration) {
+            Ok(resolved) => resolved,
+            Err(error) => unreachable!("{command} must resolve: {error}"),
+        };
+        let revision = match Version::new("1.1.0") {
+            Ok(revision) => revision,
+            Err(error) => unreachable!("test revision must be valid: {error}"),
+        };
+        resolved.fingerprint(candidate.operation_kind(), &revision)
+    }
+
+    /// The witness the design names by name: "target-set change ignored during
+    /// revalidation".
+    ///
+    /// A fingerprint whose comparison misses a changed target set is worse than
+    /// no fingerprint. Milestone 2 redeems an approval by revalidating, so a
+    /// comparison that returns `Unchanged` for a different set of files is a
+    /// mechanism for redeeming an approval against paths nobody approved --
+    /// which is precisely the attack the fingerprint exists to prevent.
+    #[test]
+    fn red_first_witness_detects_a_target_set_change_ignored_during_revalidation() {
+        let boundary = directory("revalidate");
+        let working = directory("revalidate/worktree");
+        for name in ["approved.txt", "substituted.txt"] {
+            match std::fs::write(working.join(name), b"contents") {
+                Ok(()) => {}
+                Err(error) => unreachable!("test file must be writable: {error}"),
+            }
+        }
+        let configuration = configuration(working, boundary);
+
+        let approved = fingerprint_for("git log -- approved.txt", &configuration);
+        let substituted = fingerprint_for("git log -- substituted.txt", &configuration);
+
+        // Same command shape, same count, same everything except which file.
+        assert_eq!(approved.target_count(), substituted.target_count());
+        assert_eq!(approved.operation_kind(), substituted.operation_kind());
+        assert_eq!(
+            revalidate(&approved, &substituted),
+            Revalidation::Changed(FingerprintChange::TargetSet)
+        );
+        assert_ne!(approved.digest(), substituted.digest());
+
+        // Identity must revalidate, or the comparison would be trivially
+        // "correct" by rejecting everything.
+        assert_eq!(revalidate(&approved, &approved), Revalidation::Unchanged);
+        assert_eq!(
+            revalidate(
+                &approved,
+                &fingerprint_for("git log -- approved.txt", &configuration)
+            ),
+            Revalidation::Unchanged,
+            "recomputing the same resolution must revalidate"
+        );
+
+        // The retained witness compares only the fields that are cheap to
+        // compare and skips the set digest, so a substituted file passes.
+        assert_eq!(
+            vulnerable_revalidation_ignores_target_set(&approved, &substituted),
+            Revalidation::Unchanged
+        );
+    }
+
+    /// Reordering the same pathspecs is not a change.
+    ///
+    /// Behaviour-pinning rather than a security invariant: the fail-safe
+    /// direction would be to call it changed. It is pinned because a
+    /// revalidation that fails for a reason no operator can act on is one that
+    /// gets switched off.
+    #[test]
+    fn target_order_does_not_affect_the_fingerprint() {
+        let boundary = directory("order");
+        let working = directory("order/worktree");
+        for name in ["a.txt", "b.txt"] {
+            match std::fs::write(working.join(name), b"contents") {
+                Ok(()) => {}
+                Err(error) => unreachable!("test file must be writable: {error}"),
+            }
+        }
+        let configuration = configuration(working, boundary);
+
+        assert_eq!(
+            revalidate(
+                &fingerprint_for("git log -- a.txt b.txt", &configuration),
+                &fingerprint_for("git log -- b.txt a.txt", &configuration)
+            ),
+            Revalidation::Unchanged
+        );
+        // A duplicate is a different set, though: the count separates them.
+        assert_eq!(
+            revalidate(
+                &fingerprint_for("git log -- a.txt", &configuration),
+                &fingerprint_for("git log -- a.txt a.txt", &configuration)
+            ),
+            Revalidation::Changed(FingerprintChange::TargetCount)
+        );
+    }
+
+    /// Distinct target sets must not frame to identical digest input.
+    ///
+    /// A newline is a legal filename character on Unix, so joining paths with
+    /// one is ambiguous. These two sets have the same element count and the
+    /// same joined bytes, so a separator-joined digest cannot tell them apart
+    /// and the count check does not save it either.
+    #[test]
+    fn red_first_witness_detects_ambiguous_target_framing() {
+        let left = ["a\nb".to_owned(), "c".to_owned()];
+        let right = ["a".to_owned(), "b\nc".to_owned()];
+
+        let mut framed_left = Vec::new();
+        let mut framed_right = Vec::new();
+        for target in &left {
+            frame(&mut framed_left, target.as_bytes());
+        }
+        for target in &right {
+            frame(&mut framed_right, target.as_bytes());
+        }
+        assert_ne!(
+            Digest::of(&framed_left).value(),
+            Digest::of(&framed_right).value(),
+            "length-prefixed framing must distinguish these"
+        );
+
+        // The retained witness joins with a newline, and the two sets collide.
+        assert_eq!(
+            vulnerable_separator_joined_digest(&left).value(),
+            vulnerable_separator_joined_digest(&right).value()
+        );
+    }
+
+    /// Retained red-first witness: revalidation that skips the target set.
+    fn vulnerable_revalidation_ignores_target_set(
+        recorded: &RevalidationFingerprint,
+        current: &RevalidationFingerprint,
+    ) -> Revalidation {
+        if recorded.operation_kind != current.operation_kind {
+            return Revalidation::Changed(FingerprintChange::OperationKind);
+        }
+        if recorded.target_count != current.target_count {
+            return Revalidation::Changed(FingerprintChange::TargetCount);
+        }
+        Revalidation::Unchanged
+    }
+
+    /// Retained red-first witness: a target-set digest built by joining paths
+    /// with a separator instead of length-prefixing them.
+    fn vulnerable_separator_joined_digest(targets: &[String]) -> Digest {
+        Digest::of(targets.join("\n").as_bytes())
     }
 
     /// Retained red-first witness: target scope keyed on the operation kind

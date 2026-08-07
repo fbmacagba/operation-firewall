@@ -18,6 +18,57 @@
 use core::fmt;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
+
+/// A SHA-256 digest, rendered as lowercase hex.
+///
+/// A shared primitive rather than an audit one. Two independent consumers need
+/// exactly this: an audit record, where a digest is the only way a
+/// variable-length input may appear at all, and the resolver's revalidation
+/// fingerprint, where it is how a target set is identified without carrying the
+/// paths. Defining it once keeps those two from drifting into digests that look
+/// alike and are not comparable.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct Digest {
+    algorithm: &'static str,
+    value: String,
+}
+
+impl Digest {
+    #[must_use]
+    pub fn of(bytes: &[u8]) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        let output = hasher.finalize();
+        let mut value = String::with_capacity(64);
+        for byte in output {
+            // Lowercase hex, matching the contract's `^[0-9a-f]{64}$`.
+            value.push(hex_nibble(byte >> 4));
+            value.push(hex_nibble(byte & 0x0f));
+        }
+        Self {
+            algorithm: "sha256",
+            value,
+        }
+    }
+
+    #[must_use]
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    #[must_use]
+    pub const fn algorithm(&self) -> &'static str {
+        self.algorithm
+    }
+}
+
+const fn hex_nibble(value: u8) -> char {
+    match value {
+        0..=9 => (b'0' + value) as char,
+        _ => (b'a' + value - 10) as char,
+    }
+}
 
 const MAX_IDENTIFIER_LENGTH: usize = 256;
 const MAX_NAMESPACED_NAME_LENGTH: usize = 128;

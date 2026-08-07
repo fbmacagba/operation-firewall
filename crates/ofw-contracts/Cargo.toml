@@ -12,6 +12,9 @@ publish.workspace = true
 # Reviewed in docs/decisions/0004-vetted-serialization-and-digest-dependencies.md
 # before this file was modified. `derive` only: `rc` and `unstable` stay off.
 serde = { version = "1.0.229", features = ["derive"] }
+# Same crate and same review as `ofw-audit`'s use of it; moving `Digest` here
+# relocates an already-reviewed dependency rather than adding a new one.
+sha2 = { version = "0.11.0", default-features = false }
 
 [dev-dependencies]
 # Test-only: reads the normative schemas so a wire-vocabulary drift fails the
