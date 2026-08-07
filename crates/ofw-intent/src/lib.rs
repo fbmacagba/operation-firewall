@@ -920,6 +920,46 @@ mod tests {
         }
     }
 
+    /// The command-length bound is enforced at its boundary.
+    ///
+    /// Built from many long words rather than one enormous one on purpose. The
+    /// obvious version -- a single token of `MAX_COMMAND_BYTES` -- is refused
+    /// by `MAX_TOKEN_BYTES` first and never reaches the command-length check at
+    /// all, so it would pass while constraining nothing. Same wrong-layer trap
+    /// as writing a classification test whose input fails at tokenizing.
+    #[test]
+    fn the_command_length_bound_holds_at_its_boundary() {
+        // Long enough that `MAX_TOKENS` is not reached first, short enough that
+        // `MAX_TOKEN_BYTES` is not reached either.
+        const WORD: usize = 4_000;
+        let command_of = |total: usize| {
+            let mut command = String::with_capacity(total);
+            while total - command.len() > WORD + 1 {
+                command.push_str(&"a".repeat(WORD));
+                command.push(' ');
+            }
+            command.push_str(&"a".repeat(total - command.len()));
+            command
+        };
+
+        let at_limit = command_of(MAX_COMMAND_BYTES);
+        assert_eq!(at_limit.len(), MAX_COMMAND_BYTES, "the fixture is exact");
+        assert!(
+            tokenize(&at_limit).is_ok(),
+            "a command exactly at the limit is allowed"
+        );
+
+        // One byte over, and far over: an `==` mutant refuses only the first of
+        // these, so a single over-limit case would not notice the difference.
+        for excess in [1, 2, MAX_TOKEN_BYTES] {
+            assert_eq!(
+                tokenize(&command_of(MAX_COMMAND_BYTES + excess)),
+                Err(ShellError::CommandTooLong),
+                "a command {excess} bytes over the limit must be refused"
+            );
+        }
+    }
+
     /// The token-count bound is enforced at its boundary.
     #[test]
     fn the_token_count_bound_holds_at_its_boundary() {
@@ -938,6 +978,23 @@ mod tests {
                 "{excess} tokens over the limit must be refused"
             );
         }
+
+        // The same count again, with a trailing space.
+        //
+        // This case exists to pin which check does the work. `push_token`
+        // refuses at `>=` before pushing, so the in-loop `tokens.len() >
+        // MAX_TOKENS` guard below it can never be true -- that comparison is
+        // unreachable, and saying so is more honest than implying it holds a
+        // live path. What the trailing space changes is *where* the last token
+        // is pushed: inside the loop rather than after it, so the count reaches
+        // exactly `MAX_TOKENS` while the in-loop check still runs. A mutation
+        // of that check to `>=` or `==` then refuses a command that is within
+        // every documented bound.
+        let trailing = format!("{} ", words(MAX_TOKENS));
+        assert!(
+            tokenize(&trailing).is_ok(),
+            "exactly the limit, pushed inside the loop, is still allowed"
+        );
     }
 
     #[test]

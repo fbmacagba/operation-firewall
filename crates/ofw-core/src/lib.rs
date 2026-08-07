@@ -947,6 +947,43 @@ mod tests {
         assert_eq!(proof(vulnerable).baseline(), BaselineRestriction::Allow);
     }
 
+    /// Every reason an operation could not be proven reaches the operator as
+    /// distinct, non-empty text.
+    ///
+    /// The hook's stderr is the whole of what an operator sees when a decision
+    /// goes against them, and `ProofError` is the half of that which says what
+    /// was missing. A `Display` rendering nothing turns "blast radius is
+    /// unknown" into a blank line, which reads as a malfunction rather than a
+    /// decision -- and two variants sharing one message loses the distinction
+    /// the enum exists to carry.
+    #[test]
+    fn every_proof_error_renders_a_distinct_message() {
+        let all = [
+            ProofError::IncompleteTargets,
+            ProofError::UnknownBlastRadius,
+            ProofError::UnknownEffect,
+            ProofError::UnknownEnvironment,
+            ProofError::UnknownReversibility,
+        ];
+
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for error in all {
+            let rendered = match error {
+                // Exhaustive on purpose. A variant added later stops compiling
+                // here until it is named, so this test cannot silently fall
+                // behind the enum it claims to cover.
+                ProofError::IncompleteTargets
+                | ProofError::UnknownBlastRadius
+                | ProofError::UnknownEffect
+                | ProofError::UnknownEnvironment
+                | ProofError::UnknownReversibility => error.to_string(),
+            };
+            assert!(!rendered.is_empty(), "{error:?} renders nothing");
+            assert!(seen.insert(rendered), "{error:?} shares another message");
+        }
+        assert_eq!(seen.len(), all.len());
+    }
+
     /// Retained red-first witness: an intent-to-evidence conversion that
     /// assumes an interpreted command reaches no execution surface.
     fn vulnerable_assumes_no_execution_surface(
