@@ -76,6 +76,78 @@ jobs:
       - name: Run the verification suite
         run: python -B scripts/verify.py
 
+  mutation:
+    name: mutation (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    # Advisory, and deliberately so on its first outing. Completion criterion 4
+    # names mutation testing, and this is the evidence for it -- but a surviving
+    # mutant is not automatically a defect. Some are equivalent mutations, and
+    # some land in code whose behaviour genuinely is not observable from
+    # outside. Failing the build on the first run would mean triaging a wall of
+    # unreviewed output under pressure to make it green, which is how a gate
+    # gets weakened rather than satisfied.
+    #
+    # `continue-on-error` is the honest setting for that, and the report is
+    # uploaded so the survivors can be read and either killed with a test or
+    # recorded as equivalent. It should be flipped to blocking once the
+    # survivor list has been triaged once.
+    #
+    # NOT verified locally before being added: `cargo-mutants` is not installed
+    # on the authoring machine and installing it writes outside the repository,
+    # which this project's operator has to authorise. So the first run of this
+    # job is also its first test -- stated here rather than discovered later.
+
+    continue-on-error: true
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Install cargo-mutants
+        # Pinned like every other tool here: an unpinned install makes the job
+        # a moving target and its output incomparable between runs.
+        #
+        # 27.1.0 is the current release, checked against crates.io rather than
+        # recalled. The first version considered, 25.0.1, does exist but dates
+        # from April 2025 and predates this workspace's edition-2024 and 1.97
+        # toolchain -- an old pin here would fail for reasons that look like
+        # defects in the code under test.
+        #
+        # Like the cargo-audit pin, this has a floor as well as a ceiling:
+        # do not lower it to "be safe".
+        run: cargo install cargo-mutants --locked --version 27.1.0
+
+      - name: Mutate the decision core
+        # Scoped to the crates where a surviving mutant means a missing
+        # security assertion. The CLI and adapter are mostly I/O plumbing whose
+        # mutants are dominated by unobservable output differences, and
+        # including them would bury the signal.
+        #
+        # `--no-shuffle` keeps the order stable so two runs are comparable.
+        run: |
+          cargo mutants --no-shuffle --timeout 120             --package ofw-core             --package ofw-policy             --package ofw-intent             --package ofw-resolve             --output mutants-report             || true
+          echo "::group::surviving mutants"
+          cat mutants-report/mutants.out/caught.txt 2>/dev/null | head -5 || true
+          echo "--- missed ---"
+          cat mutants-report/mutants.out/missed.txt 2>/dev/null || echo "none recorded"
+          echo "::endgroup::"
+
+      - name: Upload the mutation report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mutation-report
+          path: mutants-report/
+          if-no-files-found: warn
+
   supply-chain:
     name: supply chain
     runs-on: ubuntu-latest
