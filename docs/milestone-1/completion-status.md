@@ -48,6 +48,25 @@ not implemented** — deleting closed segments is the one operation here that
 cannot be reviewed afterwards, and the cost of getting it wrong is unbounded
 against a cost of disk usage for not having it.
 
+Two defects in the decision core were found and fixed on 2026-08-07, both
+latent rather than exploitable, and both of a kind that only becomes live with
+the *next* grammar slice:
+
+- The built-in baseline's read allow row required an absent execution surface;
+  the create/update row did not. A bounded, reversible, repository-local edit
+  therefore derived `Allow` even through a command that reaches an execution
+  surface. Unreachable today only because the interpreted subset has no
+  `Create` or `Update` kind — apply-patch is the next slice and is both. The
+  condition is now hoisted into the shared "may be allowed at all" guard so a
+  row added later cannot omit it.
+- `effect`, `privilege` and `publication` were literals at the intent-to-
+  evidence boundary, so every recognized operation was a standard-privilege,
+  non-publishing read by construction. A `git push` added to the old match arm
+  would have been classified a read and skipped the baseline's publication deny
+  row, with nothing in the diff to show a security decision had been made. They
+  are now per-subcommand entries in the grammar table, and `ofw-core` reads
+  them through exhaustive matches.
+
 Not implemented: retention, path-operand resolution (`git log`/`show`/`diff`
 need revision and pathspec extraction), the apply-patch grammar, the PowerShell
 subset, the revalidation fingerprint, ownership/permission verification of the
@@ -81,9 +100,22 @@ bindings, which would need `unsafe` in this project's own crates.
 
 ### 4 — Test gates: partial
 
-Present: 120 tests; 23 retained red-first witnesses; negative and abuse corpora;
-canary tests on the CLI streams, bundle errors and audit records; property-style
-monotonicity; deadline handling in the hook.
+Present: **131 tests; 23 retained red-first witnesses**; negative and abuse
+corpora; canary tests on the CLI streams, bundle errors and audit records;
+property-style monotonicity; deadline handling in the hook.
+
+Both figures are counted from a run of `scripts/verify.py` on the day of
+writing, not carried forward. The previous revision of this section said "120
+tests; 23 witnesses" and a session handoff note said "139 tests; 24 witnesses";
+both were wrong, in opposite directions, and neither was checked before being
+repeated. A stale count in a document whose purpose is honest reporting is a
+defect in the document.
+
+The decision space is now covered exhaustively rather than by sampled cases:
+three baselines plus the no-proof case against all four policy outcomes,
+sixteen cells, asserting that `Allow` is reachable from exactly one of them.
+Weakening `decide` so an indeterminate policy no longer short-circuits reds
+that test and no other, which is why it was written.
 
 Fuzzing is present as of 2026-08-07: `fuzz/` holds libFuzzer targets for all
 three untrusted parsers (Codex envelope, policy bundle, shell tokenizer), run by
@@ -117,11 +149,25 @@ Each is canary-tested across `Display`, `Debug` and serialized form.
 ### 6 — The `NoRestriction` advisory: met, review outstanding
 
 Policy silence cannot reach an allow: allow requires a proof whose derived
-baseline is allow, and an absent proof is always `indeterminate`. The criterion
-also requires the resolution be **reviewed before orchestration is accepted**;
-that review has not happened. `EffectivePolicy::evaluate` also remains public,
-so nothing structurally forces a caller through `ofw_core::decide` — the CLI is
-the only caller, but that is convention rather than a type-level guarantee.
+baseline is allow, and an absent proof is always `indeterminate`. This is now
+established exhaustively rather than by example — see criterion 4.
+
+The advisory exists as an open finding in the `aramid` ledger
+(`b79b75cd…`, `llm/logic` on `crates/ofw-policy/src/lib.rs`). Its prescribed
+fix — "represent built-in supported-operation proof as an explicit input, and
+return `Indeterminate` unless that baseline proves the operation is supported"
+— **is present**: that is exactly `ofw_core::decide`'s signature and its
+absent-proof branch.
+
+It is deliberately left open, because closing it takes two answers and only the
+first is yes. The finding's stated concern was "**if a caller later maps
+`NoRestriction` to allow**", and that half is not structurally prevented:
+`EffectivePolicy::evaluate` is public, so a caller can read the outcome and
+compose its own answer without calling `decide`. No library API can prevent
+that — a caller who ignores the composition function is writing a different
+decision engine, not bypassing a guard — so the residual is real but not
+fixable by more code here. It is what the required human review should decide
+on, and that review has not happened.
 
 ### 7 — Supply-chain and provenance evidence: partial
 
