@@ -1,0 +1,46 @@
+# Fuzz targets for every parser that reads untrusted input.
+#
+# Excluded from the main workspace deliberately. `libfuzzer-sys` requires a
+# nightly toolchain, and the workspace pins 1.97.1 for reproducibility; keeping
+# the fuzz project separate means the pin is not weakened to enable fuzzing.
+#
+# The seeds these produce are replayed by `crates/ofw-cli/tests/fuzz_regression.rs`
+# on the *stable* toolchain, so a crash found once stays tested forever without
+# nightly being needed to check it.
+
+[package]
+name = "ofw-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ofw-adapter-codex = { path = "../crates/ofw-adapter-codex" }
+ofw-contracts = { path = "../crates/ofw-contracts" }
+ofw-intent = { path = "../crates/ofw-intent" }
+ofw-policy = { path = "../crates/ofw-policy" }
+
+[[bin]]
+name = "envelope"
+path = "fuzz_targets/envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bundle"
+path = "fuzz_targets/bundle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "command"
+path = "fuzz_targets/command.rs"
+test = false
+doc = false
+bench = false

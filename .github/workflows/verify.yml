@@ -138,3 +138,59 @@ jobs:
           name: sbom
           path: sbom.cyclonedx.json
           if-no-files-found: error
+
+  fuzz:
+    name: fuzz (nightly)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # Nightly is scoped to this job alone. The workspace stays pinned to
+    # 1.97.1 everywhere else, because the pin is a reproducibility property of
+    # the shipped artifact and libFuzzer's nightly requirement must not be
+    # allowed to erode it. `fuzz/` is excluded from the workspace for the same
+    # reason.
+    #
+    # Seeds found here are committed to tests/fuzz-corpus/ and replayed by the
+    # stable suite, so a crash found once stays checked without nightly.
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Install the nightly toolchain
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup run nightly rustc --version
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked --version 0.13.1
+
+      - name: Fuzz every untrusted parser
+        # Bounded so the job is a gate rather than a background process:
+        # each target gets a fixed time budget and a memory ceiling, and any
+        # crash fails the job. Extended campaigns belong on a schedule.
+        run: |
+          for target in envelope bundle command; do
+            echo "::group::fuzz $target"
+            cargo +nightly fuzz run "$target" \
+              --fuzz-dir fuzz \
+              -- -max_total_time=120 -rss_limit_mb=2048 -max_len=65536
+            echo "::endgroup::"
+          done
+
+      - name: Publish any crash artifacts
+        # Only runs when the step above failed. A crashing input is the most
+        # valuable output this job can produce and must not be lost with the
+        # runner.
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore

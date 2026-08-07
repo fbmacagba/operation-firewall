@@ -9,6 +9,11 @@ members = [
     "crates/ofw-policy",
     "crates/ofw-resolve",
 ]
+# `fuzz/` is its own project: libfuzzer-sys needs nightly, and the pin above is
+# a deliberate reproducibility property that must not be weakened to enable
+# fuzzing. Seeds it finds are replayed on this toolchain by
+# crates/ofw-cli/tests/fuzz_regression.rs.
+exclude = ["fuzz"]
 resolver = "3"
 
 [workspace.package]

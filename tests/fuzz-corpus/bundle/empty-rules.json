@@ -1,0 +1,1 @@
+{"schema_version":"1.0","bundle_id":"a","bundle_version":"1.0.0","layer":"organization","issued_at":"2026-08-07T00:00:00Z","authority":{"issuer_id":"a","key_id":null},"scope":{"tenant_ids":[],"environments":["local"],"repository_ids":[]},"rules":[]}

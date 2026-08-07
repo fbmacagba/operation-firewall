@@ -76,11 +76,17 @@ Present: 120 tests; 23 retained red-first witnesses; negative and abuse corpora;
 canary tests on the CLI streams, bundle errors and audit records; property-style
 monotonicity; deadline handling in the hook.
 
-Absent: fuzz targets (they need a nightly toolchain, which conflicts with the
-pinned 1.97.1 — an operator decision, not one to take silently), mutation
-testing, concurrency tests (no concurrent writer exists yet — audit persistence
-is where it will), and warm-path performance benchmarks against the design's
-p95 ≤ 25 ms target.
+Fuzzing is present as of 2026-08-07: `fuzz/` holds libFuzzer targets for all
+three untrusted parsers (Codex envelope, policy bundle, shell tokenizer), run by
+a nightly-only CI job. Nightly is scoped to that job alone — `fuzz/` is excluded
+from the workspace so the 1.97.1 pin, which is a reproducibility property of the
+shipped artifact, is not weakened to enable it. Seeds are committed to
+`tests/fuzz-corpus/` and replayed by the **stable** suite, so a crash found once
+stays checked on every ordinary `cargo test` without nightly being installed.
+
+Absent: mutation testing, concurrency tests (no concurrent writer exists yet —
+audit persistence is where one will), and warm-path performance benchmarks
+against the design's p95 ≤ 25 ms target.
 
 Every guard added in this milestone was verified load-bearing by weakening it
 alone and confirming the matching test reds — not merely by the suite passing.
@@ -127,13 +133,18 @@ now covered by tests.
 
 ## Open items that need a decision rather than effort
 
-- **Fuzz targets need a nightly toolchain**, which conflicts with the pinned
-  1.97.1. Pinning is a deliberate reproducibility property; adding a second
-  toolchain for fuzzing is an operator's call.
-- **Confirming the Codex allow wire shape** requires reading the installed
-  host's own files, which are outside this repository. The shape is currently
-  inferred from the documented deny form and is unreachable today, but it is a
-  guess in a security boundary and should not stay one.
-- **Per-platform resolver evidence needs `unsafe`** in this project's crates for
-  the Windows path, against a workspace-wide `forbid(unsafe_code)`. Either the
-  forbid narrows to specific crates or the evidence stays uncollected.
+All three were decided on 2026-08-07:
+
+- **Fuzzing**: nightly added for the fuzz job only; the workspace pin is
+  untouched. Done.
+- **The Codex wire**: confirmed by read-only inspection of the installed
+  binary's embedded JSON Schema, with explicit authorisation. The allow object
+  this project emits is correct. It also **corrected** a claim in this project's
+  own research — `ask` *is* a valid wire decision, so the current
+  `ask` → wire-deny mapping is a design choice rather than the protocol
+  constraint it was recorded as. Revisiting it is now an open design question,
+  and the behaviour is safe either way because deny is the more restrictive of
+  the two. Done, with a follow-on decision surfaced.
+- **Per-platform resolver evidence**: the workspace-wide `forbid(unsafe_code)`
+  is kept, and the evidence stays uncollected. Criterion 3 remains partial by
+  choice rather than by omission, and this is the reason.

@@ -1,0 +1,1 @@
+{"session_id":"s","transcript_path":null,"cwd":"c","hook_event_name":"PreToolUse","model":"m","turn_id":"t","permission_mode":"default","tool_name":"Bash","tool_use_id":"u","tool_input":{"command":"git status"}}
