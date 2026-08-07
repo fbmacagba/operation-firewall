@@ -80,12 +80,23 @@ pub enum Publication {
 ///
 /// # Trust boundary
 ///
-/// These fields are **trusted inputs, not proofs**. Establishing that
-/// `containment` really is `RepositoryLocal`, that `execution_surface` really
-/// is `None`, or that a publication really is `Safe` is the platform
-/// resolver's job, and the resolver is a later Milestone 1 slice. Until it
-/// lands, a [`SupportedOperationProof`] is exactly as trustworthy as whoever
-/// constructed its evidence.
+/// These fields are **trusted inputs, not proofs**: this type records what was
+/// established elsewhere and derives a verdict from it, so a
+/// [`SupportedOperationProof`] is exactly as trustworthy as whatever
+/// established its evidence. Who that is differs per field, and the split is
+/// the thing a reviewer needs:
+///
+/// - `containment`, `target_completeness`, `environment`, `blast_radius` and
+///   `reversibility` come from `ofw-resolve`, which canonicalizes against a
+///   trusted boundary. It shipped on 2026-08-07 and the pipeline uses it.
+/// - `operation_kind`, `effect`, `execution_surface`, `privilege` and
+///   `publication` come from `ofw-intent`'s closed grammar, which reads only
+///   the literal argv.
+///
+/// Neither reads an agent- or repository-supplied label, and nothing may
+/// introduce one. What is **not** established by either: that the resolved
+/// boundary is itself trustworthy, which needs the ownership and permission
+/// verification Milestone 1 has not built.
 ///
 /// What this type does guarantee is narrower and still worth having: the
 /// baseline *verdict* is derived from the evidence rather than accepted from
@@ -273,8 +284,9 @@ impl std::error::Error for ProofError {}
 ///
 /// No field here is derivable from a command string. Containment needs
 /// canonicalization against a trusted boundary; environment comes from trusted
-/// configuration and never from an agent label. The resolver is a later
-/// Milestone 1 slice, so nothing in the shipped pipeline can supply this yet.
+/// configuration and never from an agent label. `ofw-resolve` supplies all
+/// five, and the pipeline calls it -- an operation whose targets it cannot
+/// resolve has no `ResolvedContext`, hence no proof, hence `Indeterminate`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ResolvedContext {
     pub containment: Containment,
@@ -308,6 +320,19 @@ pub fn evidence_from_intent(
         // guard that keeps it that way if one is ever added.
         ofw_intent::ExecutionSurfaceRisk::RepositoryConfigControlled => ExecutionSurface::Present,
     };
+    // Read from the grammar rather than written as literals here. Both were
+    // hardcoded until 2026-08-07, which was correct only for as long as the
+    // interpreted subset stayed read-only: a subcommand that publishes or
+    // needs privilege would have been given the read-only subset's answers
+    // without the diff showing a security decision at all. Each match is
+    // exhaustive, so a new variant in `ofw-intent` cannot compile until its
+    // baseline consequence is stated here.
+    let privilege = match candidate.privilege_risk() {
+        ofw_intent::PrivilegeRisk::Standard => PrivilegeRequirement::Standard,
+    };
+    let publication = match candidate.publication_risk() {
+        ofw_intent::PublicationRisk::Contained => Publication::NotApplicable,
+    };
 
     OperationEvidence {
         grammar_revision,
@@ -316,11 +341,8 @@ pub fn evidence_from_intent(
         execution_surface,
         target_completeness: resolved.target_completeness,
         containment: resolved.containment,
-        // Privilege and publication are resolver concerns too. Standard and
-        // not-applicable are correct for the read-only subset interpreted
-        // today and must be revisited when mutations are interpreted.
-        privilege: PrivilegeRequirement::Standard,
-        publication: Publication::NotApplicable,
+        privilege,
+        publication,
         reversibility: resolved.reversibility,
         blast_radius: resolved.blast_radius,
         environment: resolved.environment,

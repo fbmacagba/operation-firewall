@@ -168,12 +168,42 @@ pub enum ExecutionSurfaceRisk {
     RepositoryConfigControlled,
 }
 
+/// Whether the operation needs privilege beyond the invoking user's own, or
+/// touches a security control.
+///
+/// One variant, like [`ExecutionSurfaceRisk`], and for the same reason: the
+/// interpreted subset contains nothing else, and speculative variants invite a
+/// mapping written for a case nobody has thought through. Adding one is a
+/// deliberate act that breaks `ofw-core`'s exhaustive match and forces the
+/// baseline consequence to be stated at the same time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrivilegeRisk {
+    /// Runs with the invoking user's own privileges and reads or writes no
+    /// security control.
+    Standard,
+}
+
+/// Whether the operation moves repository content across a trust boundary.
+///
+/// Separate from the execution surface because they fail differently: an
+/// execution surface runs someone else's code here, publication sends this
+/// repository's content there. `git push`, `git send-email` and
+/// `git request-pull` are all publications with no execution surface of their
+/// own.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PublicationRisk {
+    /// Nothing leaves the repository.
+    Contained,
+}
+
 /// A recognized operation, before any target resolution.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IntentCandidate {
     operation_kind: NamespacedName,
     effect: OperationEffect,
     execution_surface_risk: ExecutionSurfaceRisk,
+    privilege_risk: PrivilegeRisk,
+    publication_risk: PublicationRisk,
     path_candidates: Vec<String>,
 }
 
@@ -191,6 +221,16 @@ impl IntentCandidate {
     #[must_use]
     pub const fn execution_surface_risk(&self) -> ExecutionSurfaceRisk {
         self.execution_surface_risk
+    }
+
+    #[must_use]
+    pub const fn privilege_risk(&self) -> PrivilegeRisk {
+        self.privilege_risk
+    }
+
+    #[must_use]
+    pub const fn publication_risk(&self) -> PublicationRisk {
+        self.publication_risk
     }
 
     #[must_use]
@@ -236,6 +276,50 @@ const REV_PARSE_FLAGS: [&str; 4] = [
     "--is-inside-work-tree",
 ];
 
+/// Everything the grammar must state about one interpreted subcommand.
+///
+/// A table rather than literals at the construction site, because `effect`,
+/// `privilege` and `publication` used to be constructor defaults: every
+/// `IntentCandidate` was built as a standard-privilege, non-publishing `Read`.
+/// That is correct for a read-only subset and silently wrong for the first
+/// subcommand that is not one -- a `git push` added to the match arm would have
+/// been classified a read, skipping the baseline's publication deny row
+/// entirely, with nothing in the diff to suggest a security decision had been
+/// taken. Stating them per subcommand, beside the flag allowlist, makes that
+/// decision impossible to inherit by accident.
+struct SubcommandProfile {
+    subcommand: &'static str,
+    kind: &'static str,
+    allowed: &'static [&'static str],
+    effect: OperationEffect,
+    privilege: PrivilegeRisk,
+    publication: PublicationRisk,
+}
+
+/// The interpreted subset, in full.
+///
+/// `interpreted_subset_is_pinned` enumerates this table, so widening it fails a
+/// test that names the grammar revision -- a subcommand cannot be added without
+/// the addition being looked at.
+const INTERPRETED_SUBCOMMANDS: [SubcommandProfile; 2] = [
+    SubcommandProfile {
+        subcommand: "status",
+        kind: "git.status",
+        allowed: &STATUS_FLAGS,
+        effect: OperationEffect::Read,
+        privilege: PrivilegeRisk::Standard,
+        publication: PublicationRisk::Contained,
+    },
+    SubcommandProfile {
+        subcommand: "rev-parse",
+        kind: "git.rev_parse",
+        allowed: &REV_PARSE_FLAGS,
+        effect: OperationEffect::Read,
+        privilege: PrivilegeRisk::Standard,
+        publication: PublicationRisk::Contained,
+    },
+];
+
 /// Recognized git subcommands that this slice does not interpret.
 ///
 /// Naming them separately keeps "we know this command and have not done it
@@ -266,18 +350,21 @@ pub fn classify(tokens: &[String]) -> Classification {
     }
 
     let arguments = &tokens[2..];
-    let (kind, allowed) = match subcommand.as_str() {
-        "status" => ("git.status", STATUS_FLAGS.as_slice()),
-        "rev-parse" => ("git.rev_parse", REV_PARSE_FLAGS.as_slice()),
-        other => {
-            let _ = KNOWN_UNINTERPRETED_SUBCOMMANDS.contains(&other);
-            return Classification::Unsupported(UnsupportedReason::SubcommandUnsupported);
-        }
+    let Some(profile) = INTERPRETED_SUBCOMMANDS
+        .iter()
+        .find(|profile| profile.subcommand == subcommand.as_str())
+    else {
+        let _ = KNOWN_UNINTERPRETED_SUBCOMMANDS.contains(&subcommand.as_str());
+        return Classification::Unsupported(UnsupportedReason::SubcommandUnsupported);
     };
 
     let mut seen: Vec<&str> = Vec::new();
     for argument in arguments {
-        let Some(flag) = allowed.iter().find(|candidate| *candidate == argument) else {
+        let Some(flag) = profile
+            .allowed
+            .iter()
+            .find(|candidate| *candidate == argument)
+        else {
             return Classification::Unsupported(UnsupportedReason::ArgumentNotAllowlisted);
         };
         if seen.contains(flag) {
@@ -286,7 +373,7 @@ pub fn classify(tokens: &[String]) -> Classification {
         seen.push(flag);
     }
 
-    let operation_kind = match NamespacedName::new(kind) {
+    let operation_kind = match NamespacedName::new(profile.kind) {
         Ok(operation_kind) => operation_kind,
         // `kind` is a compiled-in literal that satisfies the contract, so this
         // is unreachable; refusing rather than proceeding keeps the failure
@@ -296,8 +383,14 @@ pub fn classify(tokens: &[String]) -> Classification {
 
     Classification::Supported(Box::new(IntentCandidate {
         operation_kind,
-        effect: OperationEffect::Read,
+        effect: profile.effect,
+        // Not table-driven, and deliberately so: this is the one property no
+        // subcommand may declare itself exempt from. No git command can be
+        // proven non-executing from its argv, so an author adding a subcommand
+        // is not offered the chance to claim otherwise.
         execution_surface_risk: ExecutionSurfaceRisk::RepositoryConfigControlled,
+        privilege_risk: profile.privilege,
+        publication_risk: profile.publication,
         path_candidates: Vec::new(),
     }))
 }
@@ -311,10 +404,94 @@ pub fn interpret(command: &str) -> Result<Classification, ShellError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Classification, ExecutionSurfaceRisk, MAX_COMMAND_BYTES, ShellError, UnsupportedReason,
-        classify, interpret, tokenize,
+        Classification, ExecutionSurfaceRisk, GRAMMAR_REVISION, INTERPRETED_SUBCOMMANDS,
+        MAX_COMMAND_BYTES, PrivilegeRisk, PublicationRisk, ShellError, UnsupportedReason, classify,
+        interpret, tokenize,
     };
     use ofw_contracts::OperationEffect;
+
+    /// The interpreted subset, stated independently of the table that defines
+    /// it.
+    ///
+    /// This test exists to fail when the subset is widened. That is its whole
+    /// purpose: `effect`, `privilege` and `publication` are per-subcommand
+    /// security decisions, and the failure mode being guarded is an author
+    /// adding a row by copying the one above it. A `git push` copied from
+    /// `git status` would claim to be a contained, standard-privilege read.
+    ///
+    /// Editing this test to admit a new subcommand is the intended way through
+    /// -- the point is that it cannot be skipped, and that the values have to
+    /// be typed out a second time where a reviewer will see them.
+    #[test]
+    fn interpreted_subset_is_pinned() {
+        assert_eq!(GRAMMAR_REVISION, "1.0.0");
+
+        let declared: Vec<_> = INTERPRETED_SUBCOMMANDS
+            .iter()
+            .map(|profile| {
+                (
+                    profile.subcommand,
+                    profile.kind,
+                    profile.effect,
+                    profile.privilege,
+                    profile.publication,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            declared,
+            vec![
+                (
+                    "status",
+                    "git.status",
+                    OperationEffect::Read,
+                    PrivilegeRisk::Standard,
+                    PublicationRisk::Contained,
+                ),
+                (
+                    "rev-parse",
+                    "git.rev_parse",
+                    OperationEffect::Read,
+                    PrivilegeRisk::Standard,
+                    PublicationRisk::Contained,
+                ),
+            ],
+            "widening the interpreted subset is a grammar revision and a \
+             security decision per field"
+        );
+    }
+
+    /// Each table entry's declared values survive the trip through `classify`.
+    ///
+    /// What this catches is the *wiring*: a constructor that reads back a
+    /// literal instead of the profile, or one that hands every subcommand the
+    /// first row's values. Verified by weakening, not assumed.
+    ///
+    /// What it does **not** catch, measured rather than reasoned: a typo in a
+    /// `subcommand` string. This test builds its command from that same field,
+    /// so a misspelled row is invoked under its misspelling and passes. A dead
+    /// row is caught by `interpreted_subset_is_pinned`, which spells the
+    /// subcommand out independently -- that is the reason the pin restates the
+    /// values rather than reading them from the table.
+    ///
+    /// Deliberately *not* an assertion about the execution surface: that enum
+    /// has one variant, so asserting it holds would pass whatever the code did.
+    #[test]
+    fn every_table_entry_is_reachable_and_keeps_its_own_profile() {
+        for profile in &INTERPRETED_SUBCOMMANDS {
+            let command = format!("git {}", profile.subcommand);
+            match interpret(&command) {
+                Ok(Classification::Supported(candidate)) => {
+                    assert_eq!(candidate.operation_kind().as_str(), profile.kind);
+                    assert_eq!(candidate.effect(), profile.effect);
+                    assert_eq!(candidate.privilege_risk(), profile.privilege);
+                    assert_eq!(candidate.publication_risk(), profile.publication);
+                }
+                other => unreachable!("{command} must classify, got {other:?}"),
+            }
+        }
+    }
 
     fn tokens(command: &str) -> Vec<String> {
         match tokenize(command) {
