@@ -102,7 +102,15 @@ jobs:
       - name: Install cargo-audit
         # `--locked` so the tool's own dependency graph is the one its authors
         # published, not whatever resolves today.
-        run: cargo install cargo-audit --locked --version 0.21.2
+        #
+        # The version pin has a floor as well as a ceiling: 0.21.2 cannot parse
+        # CVSS 4.0 severities, which the RustSec database now contains, and it
+        # fails the whole scan rather than skipping the advisory it cannot read.
+        # That is the right failure mode -- a scanner that silently skipped
+        # entries it did not understand would report a clean run over a
+        # database it had only partly read -- but it means the pin must be
+        # revisited when the advisory format moves, not merely held steady.
+        run: cargo install cargo-audit --locked --version 0.22.2
 
       - name: Scan for advisories
         # The runtime is a security boundary; a known-vulnerable dependency in

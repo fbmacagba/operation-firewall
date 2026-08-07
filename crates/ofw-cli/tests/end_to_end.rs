@@ -449,6 +449,10 @@ fn doctor_reports_what_is_implemented_without_overstating_it() {
         "\"target_resolution\":\"repository_scope_only\"",
         "\"approval_capabilities\":\"not_implemented\"",
         "\"hook_registration\":\"unconfirmed\"",
+        // The probes execute the installed command path, so a doctor run is
+        // evidence that this binary denies, not merely that the library does.
+        "\"synthetic_deny\":\"passed\"",
+        "\"unusable_input_deny\":\"passed\"",
         "\"built_in_baseline\":\"implemented\"",
         // Unconfigured: nothing can be placed, so nothing is provable.
         "\"configured\":false",

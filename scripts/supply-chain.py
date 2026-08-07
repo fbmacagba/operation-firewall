@@ -16,10 +16,30 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import shutil
 import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
+def cargo_executable() -> str:
+    """Resolves cargo to a full path.
+
+    Invoking `cargo` by bare name resolves it through PATH, which is
+    attacker-influenced in exactly the way this project spends its time
+    reasoning about elsewhere. The rustup home is preferred over PATH for the
+    same reason `scripts/verify.py` prefers it.
+    """
+    fallback = ROOT.home() / ".cargo" / "bin" / (
+        "cargo.exe" if sys.platform == "win32" else "cargo"
+    )
+    if fallback.is_file():
+        return str(fallback)
+    cargo = shutil.which("cargo")
+    if cargo is not None:
+        return cargo
+    raise FileNotFoundError("cargo is not installed or available on PATH")
 
 # Every licence expression the project accepts. Compared as exact strings
 # rather than parsed: an SPDX expression parser would be another thing to get
@@ -42,7 +62,7 @@ ALLOWED_LICENCES = frozenset(
 
 def cargo_metadata() -> dict:
     completed = subprocess.run(  # noqa: S603
-        ["cargo", "metadata", "--format-version", "1", "--locked"],
+        [cargo_executable(), "metadata", "--format-version", "1", "--locked"],
         cwd=ROOT,
         capture_output=True,
         text=True,

@@ -23,6 +23,7 @@
 mod json;
 mod pipeline;
 mod policy;
+mod probe;
 
 use std::io::{Read, Write};
 use std::panic;
@@ -58,7 +59,7 @@ const ENVIRONMENT_VARIABLE: &str = "OFW_ENVIRONMENT";
 const POLICY_DIRECTORY_VARIABLE: &str = "OFW_POLICY_DIRECTORY";
 
 const EXIT_OK: i32 = 0;
-const EXIT_DENY: i32 = 2;
+pub(crate) const EXIT_DENY: i32 = 2;
 /// `EX_USAGE` from `sysexits.h`. Used only for developer-facing commands --
 /// never in hook mode, where anything other than 0 or 2 fails open.
 const EXIT_USAGE: i32 = 64;
@@ -382,6 +383,22 @@ fn run_doctor() {
              startup; that loader is not implemented.",
         );
 
+    // Probes execute the installed command path rather than calling the
+    // pipeline in process. An in-process call would only re-prove what the
+    // tests already prove; what an operator needs is that *this binary, at
+    // this path* denies.
+    let (synthetic_deny, unusable_input) = probe::run_deny_probes();
+    let mut probes = json::Object::new();
+    probes
+        .string("synthetic_deny", synthetic_deny.as_str())
+        .string("unusable_input_deny", unusable_input.as_str())
+        .string(
+            "harmless_allow",
+            "not_applicable; no operation in the interpreted subset reaches an \
+             allow, so a probe expecting one would have to accept a deny and \
+             would then pass either way",
+        );
+
     let mut report = json::Object::new();
     report
         .string("schema_version", "1.0")
@@ -411,7 +428,12 @@ fn run_doctor() {
              Every state-changing operation is therefore indeterminate; a \
              proven read continues with degraded health.",
         )
+        .object("hook_probes", probes)
         .string("hook_registration", "unconfirmed")
+        .string(
+            "hook_registration_note",
+            "Confirming host registration means reading the host's own              configuration, which lives outside this repository. The probes              above confirm the installed command path behaves; they do not              confirm the host is configured to call it.",
+        )
         .string("effective_wire_behaviour", "every operation denies")
         .string(
             "note",
