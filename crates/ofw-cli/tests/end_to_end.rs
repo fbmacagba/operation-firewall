@@ -86,10 +86,56 @@ fn a_valid_bash_envelope_denies_because_nothing_can_be_proven() {
         stdout(&output)
     );
     assert!(
-        stderr(&output).contains("OPERATION_INTERPRETATION_UNSUPPORTED"),
+        stderr(&output).contains("TARGET_RESOLUTION_UNSUPPORTED"),
         "stderr must carry the reason code, got: {}",
         stderr(&output)
     );
+}
+
+/// The observable deliverable of the intent slice: the reason code now records
+/// how far down the pipeline an operation actually got, rather than reporting
+/// "not interpreted" for everything.
+#[test]
+fn the_reason_code_records_how_far_the_pipeline_reached() {
+    let cases = [
+        // Interpreted successfully -- blocked one stage later, at resolution.
+        (
+            "git status",
+            "\"reason_code\":\"TARGET_RESOLUTION_UNSUPPORTED\"",
+            "\"operation_kind\":\"git.status\"",
+        ),
+        (
+            "git rev-parse --show-toplevel",
+            "\"reason_code\":\"TARGET_RESOLUTION_UNSUPPORTED\"",
+            "\"operation_kind\":\"git.rev_parse\"",
+        ),
+        // Literal words, but outside the interpreted subset.
+        (
+            "git push --force",
+            "\"reason_code\":\"OPERATION_INTERPRETATION_UNSUPPORTED\"",
+            "\"operation_kind\":\"uninterpreted\"",
+        ),
+        // Not reducible to literal words at all.
+        (
+            "git status; rm -rf /",
+            "\"reason_code\":\"COMMAND_NOT_LITERAL\"",
+            "\"operation_kind\":\"uninterpreted\"",
+        ),
+    ];
+
+    for (command, expected_reason, expected_kind) in cases {
+        let payload = stdout(&run(&["assess"], envelope("Bash", command).as_bytes()));
+        assert!(
+            payload.contains(expected_reason),
+            "{command} should report {expected_reason}, got: {payload}"
+        );
+        assert!(
+            payload.contains(expected_kind),
+            "{command} should report {expected_kind}, got: {payload}"
+        );
+        // Whatever stage it reached, it is still never an allow.
+        assert!(payload.contains("\"wire_decision\":\"deny\""));
+    }
 }
 
 #[test]
@@ -165,7 +211,7 @@ fn assess_emits_one_structured_decision_and_exits_zero() {
     for expected in [
         "\"schema_version\":\"1.0\"",
         "\"outcome\":\"indeterminate\"",
-        "\"reason_code\":\"OPERATION_INTERPRETATION_UNSUPPORTED\"",
+        "\"reason_code\":\"TARGET_RESOLUTION_UNSUPPORTED\"",
         "\"tool_name\":\"Bash\"",
         "\"supported_operation_proof\":false",
         "\"wire_decision\":\"deny\"",

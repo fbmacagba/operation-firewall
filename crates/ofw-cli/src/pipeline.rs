@@ -11,10 +11,11 @@
 //! cannot interpret is exactly the case that must not be allowed.
 
 use ofw_adapter_codex::{
-    AdapterAssessment, AdapterError, EnvelopeErrorCode, INPUT_PROTOCOL_REVISION,
-    ToolInputErrorCode, assess_supported_pre_tool_use,
+    AdapterAssessment, AdapterError, EnvelopeErrorCode, ExtractedToolInput,
+    INPUT_PROTOCOL_REVISION, ToolInputErrorCode, assess_supported_pre_tool_use,
 };
 use ofw_core::{DecisionOutcome, SupportedOperationProof, decide};
+use ofw_intent::Classification;
 use ofw_policy::{EffectivePolicy, Fact, OperationFacts};
 
 /// A stable, payload-free explanation code.
@@ -46,8 +47,22 @@ const TOOL_INPUT_INVALID: Reason = Reason {
 };
 const INTERPRETATION_UNSUPPORTED: Reason = Reason {
     code: "OPERATION_INTERPRETATION_UNSUPPORTED",
-    message: "operation intent interpretation is not implemented, so the \
-              operation cannot be proven supported",
+    message: "operation is outside the interpreted subset, so it cannot be \
+              proven supported",
+};
+const COMMAND_NOT_LITERAL: Reason = Reason {
+    code: "COMMAND_NOT_LITERAL",
+    message: "command contains shell constructs that cannot be resolved to \
+              literal words without evaluating them",
+};
+/// The operation *was* interpreted. It still cannot be proven, because
+/// containment and target completeness are resolver facts and the platform
+/// resolver is a later slice. This is one stage further than
+/// `OPERATION_INTERPRETATION_UNSUPPORTED`, and the distinction is asserted.
+const TARGET_RESOLUTION_UNSUPPORTED: Reason = Reason {
+    code: "TARGET_RESOLUTION_UNSUPPORTED",
+    message: "operation was interpreted, but target resolution is not \
+              implemented, so no supported-operation proof can be built",
 };
 
 pub const INPUT_READ_FAILED: Reason = Reason {
@@ -75,6 +90,8 @@ pub struct Assessment {
     /// `None` until the envelope has been validated far enough to know it.
     /// Only ever one of the adapter's compiled-in supported tool names.
     pub tool_name: Option<&'static str>,
+    /// The normalized operation kind, when interpretation succeeded.
+    pub operation_kind: Option<&'static str>,
     pub proof_present: bool,
     pub policy_outcome: &'static str,
 }
@@ -98,19 +115,47 @@ pub fn assess(input: &[u8]) -> Assessment {
         _ => None,
     };
 
-    // No intent interpreter exists yet, so no proof can be constructed.
-    // `decide` returns `Indeterminate` for an absent proof regardless of what
-    // policy says -- which is the property worth demonstrating end to end.
+    let (reason, operation_kind) = match extracted.tool_input() {
+        ExtractedToolInput::Bash(bash) => interpret_command(bash.command()),
+        // The apply-patch grammar is a separate slice.
+        ExtractedToolInput::ApplyPatch(_) => (INTERPRETATION_UNSUPPORTED, None),
+    };
+
+    // Even a fully interpreted operation yields no proof: `evidence_from_intent`
+    // requires resolver-supplied containment and target completeness, and no
+    // resolver exists. `decide` returns `Indeterminate` for an absent proof
+    // regardless of what policy says -- the property worth showing end to end.
     let proof: Option<&SupportedOperationProof> = None;
     let evaluation = empty_policy_evaluation();
     let outcome = decide(proof, &evaluation);
 
     Assessment {
         outcome,
-        reason: INTERPRETATION_UNSUPPORTED,
+        reason,
         tool_name,
+        operation_kind,
         proof_present: false,
         policy_outcome: policy_outcome_name(&evaluation),
+    }
+}
+
+/// Interprets one Bash command, returning how far the pipeline got.
+///
+/// The returned operation kind is narrowed to a compiled-in literal rather
+/// than borrowed from the interpreter's output, so no payload-derived string
+/// can reach stdout, stderr or a future audit record.
+fn interpret_command(command: &str) -> (Reason, Option<&'static str>) {
+    match ofw_intent::interpret(command) {
+        Err(_) => (COMMAND_NOT_LITERAL, None),
+        Ok(Classification::Unsupported(_)) => (INTERPRETATION_UNSUPPORTED, None),
+        Ok(Classification::Supported(candidate)) => {
+            let kind = match candidate.operation_kind().as_str() {
+                "git.status" => Some("git.status"),
+                "git.rev_parse" => Some("git.rev_parse"),
+                _ => None,
+            };
+            (TARGET_RESOLUTION_UNSUPPORTED, kind)
+        }
     }
 }
 
@@ -120,6 +165,7 @@ fn indeterminate(reason: Reason, tool_name: Option<&'static str>) -> Assessment 
         outcome: DecisionOutcome::Indeterminate,
         reason,
         tool_name,
+        operation_kind: None,
         proof_present: false,
         policy_outcome: policy_outcome_name(&evaluation),
     }
@@ -202,8 +248,8 @@ pub const fn protocol_revision() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        Assessment, INTERPRETATION_UNSUPPORTED, TOOL_UNSUPPORTED, assess, empty_policy_evaluation,
-        outcome_name,
+        Assessment, COMMAND_NOT_LITERAL, INTERPRETATION_UNSUPPORTED, TARGET_RESOLUTION_UNSUPPORTED,
+        TOOL_UNSUPPORTED, assess, empty_policy_evaluation, outcome_name,
     };
     use ofw_core::DecisionOutcome;
 
@@ -218,11 +264,41 @@ mod tests {
         assess(input.as_bytes())
     }
 
+    fn bash(command: &str) -> String {
+        format!(
+            concat!(
+                r#"{{"session_id":"s","transcript_path":null,"cwd":"c","#,
+                r#""hook_event_name":"PreToolUse","model":"m","turn_id":"t","#,
+                r#""permission_mode":"default","tool_name":"Bash","tool_use_id":"u","#,
+                r#""tool_input":{{"command":"{}"}}}}"#
+            ),
+            command
+        )
+    }
+
+    #[test]
+    fn the_reason_records_which_stage_the_pipeline_reached() {
+        // Interpreted, blocked one stage later at resolution.
+        assert_eq!(assess_str(VALID_BASH).reason, TARGET_RESOLUTION_UNSUPPORTED);
+        // Literal words, but outside the interpreted subset.
+        assert_eq!(
+            assess_str(&bash("git push --force")).reason,
+            INTERPRETATION_UNSUPPORTED
+        );
+        // Not reducible to literal words at all -- refused, never partially
+        // parsed into a harmless-looking `git status`.
+        assert_eq!(
+            assess_str(&bash("git status; rm -rf /")).reason,
+            COMMAND_NOT_LITERAL
+        );
+    }
+
     #[test]
     fn a_valid_envelope_is_indeterminate_because_nothing_can_be_proven() {
         let assessment = assess_str(VALID_BASH);
         assert_eq!(assessment.outcome, DecisionOutcome::Indeterminate);
-        assert_eq!(assessment.reason, INTERPRETATION_UNSUPPORTED);
+        assert_eq!(assessment.reason, TARGET_RESOLUTION_UNSUPPORTED);
+        assert_eq!(assessment.operation_kind, Some("git.status"));
         assert_eq!(assessment.tool_name, Some("Bash"));
         assert!(!assessment.proof_present);
     }

@@ -261,6 +261,65 @@ impl core::fmt::Display for ProofError {
 
 impl std::error::Error for ProofError {}
 
+/// Everything the platform resolver must establish before an interpreted
+/// intent can become evidence.
+///
+/// No field here is derivable from a command string. Containment needs
+/// canonicalization against a trusted boundary; environment comes from trusted
+/// configuration and never from an agent label. The resolver is a later
+/// Milestone 1 slice, so nothing in the shipped pipeline can supply this yet.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResolvedContext {
+    pub containment: Containment,
+    pub target_completeness: TargetCompleteness,
+    pub environment: EnvironmentClass,
+    pub blast_radius: BlastRadius,
+    pub reversibility: Reversibility,
+}
+
+/// Builds evidence from an interpreted intent plus resolver-supplied context.
+///
+/// This is the only sanctioned path from an [`ofw_intent::IntentCandidate`] to
+/// [`OperationEvidence`], and it exists so that one property cannot be bypassed
+/// by a caller assembling evidence by hand: `execution_surface` is taken from
+/// the intent's recorded risk and is **never** `None` for an interpreted
+/// command.
+///
+/// That matters most for git, which reads repository-controlled configuration.
+/// `core.fsmonitor`, `core.pager`, `diff.*.textconv` and external diff drivers
+/// all name programs git will execute, set in `.git/config` by the repository
+/// with no command-line flag involved. `git status` therefore cannot reach the
+/// bounded-read allow row, and settles at `ask` rather than `allow`.
+#[must_use]
+pub fn evidence_from_intent(
+    candidate: &ofw_intent::IntentCandidate,
+    resolved: &ResolvedContext,
+    grammar_revision: Version,
+) -> OperationEvidence {
+    let execution_surface = match candidate.execution_surface_risk() {
+        // The risk enum has no "none" variant by design; this match is the
+        // guard that keeps it that way if one is ever added.
+        ofw_intent::ExecutionSurfaceRisk::RepositoryConfigControlled => ExecutionSurface::Present,
+    };
+
+    OperationEvidence {
+        grammar_revision,
+        operation_kind: candidate.operation_kind().clone(),
+        effect: candidate.effect(),
+        execution_surface,
+        target_completeness: resolved.target_completeness,
+        containment: resolved.containment,
+        // Privilege and publication are resolver concerns too. Standard and
+        // not-applicable are correct for the read-only subset interpreted
+        // today and must be revisited when mutations are interpreted.
+        privilege: PrivilegeRequirement::Standard,
+        publication: Publication::NotApplicable,
+        reversibility: resolved.reversibility,
+        blast_radius: resolved.blast_radius,
+        environment: resolved.environment,
+    }
+}
+
 /// Joins the built-in baseline with the policy restriction.
 ///
 /// An absent proof is always `Indeterminate`: the operation was not recognized
@@ -308,8 +367,8 @@ mod tests {
 
     use super::{
         BaselineRestriction, Containment, DecisionOutcome, ExecutionSurface, OperationEvidence,
-        PrivilegeRequirement, ProofError, Publication, SupportedOperationProof, TargetCompleteness,
-        decide,
+        PrivilegeRequirement, ProofError, Publication, ResolvedContext, SupportedOperationProof,
+        TargetCompleteness, decide, evidence_from_intent,
     };
 
     fn name(value: &str) -> NamespacedName {
@@ -601,6 +660,71 @@ mod tests {
                 ..local_edit.clone()
             };
             assert_eq!(proof(elevated).baseline(), BaselineRestriction::Ask);
+        }
+    }
+
+    /// The most favourable context a resolver could possibly report.
+    ///
+    /// Used to show that a git read still does not reach allow even when every
+    /// other dimension is maximally permissive -- so the result depends on the
+    /// execution surface and nothing else.
+    const fn most_permissive_context() -> ResolvedContext {
+        ResolvedContext {
+            containment: Containment::RepositoryLocal,
+            target_completeness: TargetCompleteness::Complete,
+            environment: EnvironmentClass::Local,
+            blast_radius: BlastRadius::Single,
+            reversibility: Reversibility::Reversible,
+        }
+    }
+
+    fn git_status_intent() -> ofw_intent::IntentCandidate {
+        match ofw_intent::interpret("git status") {
+            Ok(ofw_intent::Classification::Supported(candidate)) => *candidate,
+            other => unreachable!("git status must classify, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_interpreted_git_read_settles_at_ask_not_allow() {
+        let evidence = evidence_from_intent(
+            &git_status_intent(),
+            &most_permissive_context(),
+            version("1.0.0"),
+        );
+
+        assert_eq!(evidence.execution_surface, ExecutionSurface::Present);
+        assert_eq!(evidence.effect, OperationEffect::Read);
+        // Every other dimension is maximally favourable, and it is still not
+        // an allow: git consults repository-controlled configuration that can
+        // name programs to execute, so the bounded-read allow row is unproven.
+        assert_eq!(proof(evidence).baseline(), BaselineRestriction::Ask);
+    }
+
+    #[test]
+    fn red_first_witness_detects_assuming_git_is_non_executing() {
+        let permissive = most_permissive_context();
+        let intent = git_status_intent();
+
+        let real = evidence_from_intent(&intent, &permissive, version("1.0.0"));
+        assert_eq!(proof(real).baseline(), BaselineRestriction::Ask);
+
+        // The retained vulnerable conversion treats an interpreted command as
+        // carrying no execution surface, which promotes a bounded read to a
+        // clean allow it has not earned.
+        let vulnerable = vulnerable_assumes_no_execution_surface(&intent, &permissive);
+        assert_eq!(proof(vulnerable).baseline(), BaselineRestriction::Allow);
+    }
+
+    /// Retained red-first witness: an intent-to-evidence conversion that
+    /// assumes an interpreted command reaches no execution surface.
+    fn vulnerable_assumes_no_execution_surface(
+        candidate: &ofw_intent::IntentCandidate,
+        resolved: &ResolvedContext,
+    ) -> OperationEvidence {
+        OperationEvidence {
+            execution_surface: ExecutionSurface::None,
+            ..evidence_from_intent(candidate, resolved, version("1.0.0"))
         }
     }
 

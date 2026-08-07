@@ -4,6 +4,7 @@ members = [
     "crates/ofw-cli",
     "crates/ofw-contracts",
     "crates/ofw-core",
+    "crates/ofw-intent",
     "crates/ofw-policy",
 ]
 resolver = "3"

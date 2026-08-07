@@ -1,6 +1,6 @@
 [package]
-name = "ofw-core"
-description = "Built-in safety baseline and final decision composition for Operation Firewall"
+name = "ofw-intent"
+description = "Closed, non-executing interpretation of shell command intent for Operation Firewall"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,8 +10,6 @@ publish.workspace = true
 
 [dependencies]
 ofw-contracts = { path = "../ofw-contracts" }
-ofw-intent = { path = "../ofw-intent" }
-ofw-policy = { path = "../ofw-policy" }
 
 [lints]
 workspace = true

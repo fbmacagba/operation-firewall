@@ -202,6 +202,7 @@ fn run_assess() {
             outcome: DecisionOutcome::Indeterminate,
             reason,
             tool_name: None,
+            operation_kind: None,
             proof_present: false,
             policy_outcome: "no_restriction",
         },
@@ -214,6 +215,10 @@ fn run_assess() {
         .string("reason_code", assessment.reason.code)
         .string("safe_message", assessment.reason.message)
         .string("tool_name", assessment.tool_name.unwrap_or("unknown"))
+        .string(
+            "operation_kind",
+            assessment.operation_kind.unwrap_or("uninterpreted"),
+        )
         .boolean("supported_operation_proof", assessment.proof_present)
         .string("policy_outcome", assessment.policy_outcome)
         .string("adapter_protocol_revision", pipeline::protocol_revision())

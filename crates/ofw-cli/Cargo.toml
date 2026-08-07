@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 ofw-adapter-codex = { path = "../ofw-adapter-codex" }
 ofw-core = { path = "../ofw-core" }
+ofw-intent = { path = "../ofw-intent" }
 ofw-policy = { path = "../ofw-policy" }
 
 [lints]

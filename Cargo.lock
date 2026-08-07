@@ -12,6 +12,7 @@ version = "0.1.0"
 dependencies = [
  "ofw-adapter-codex",
  "ofw-core",
+ "ofw-intent",
  "ofw-policy",
 ]
 
@@ -24,7 +25,15 @@ name = "ofw-core"
 version = "0.1.0"
 dependencies = [
  "ofw-contracts",
+ "ofw-intent",
  "ofw-policy",
+]
+
+[[package]]
+name = "ofw-intent"
+version = "0.1.0"
+dependencies = [
+ "ofw-contracts",
 ]
 
 [[package]]
