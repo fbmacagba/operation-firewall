@@ -2013,11 +2013,30 @@ mod tests {
         // The ancestor canonicalized to somewhere else, so the target is
         // outside the boundary and the operation is cross-boundary -- which the
         // baseline denies outright.
+        //
+        // Note what the fixture also happens to cover: the outside directory is
+        // a *sibling* whose name begins with the boundary's, so a containment
+        // check comparing canonical paths as strings rather than by component
+        // would call this repository-local. `vulnerable_string_prefix_containment`
+        // is the retained witness for that, and this is a second, independent
+        // input that would defeat it.
         assert_eq!(resolved.context().containment, Containment::CrossBoundary);
         let Some(target) = resolved.canonical_targets().first() else {
             unreachable!("a creation resolves one target")
         };
-        assert!(!target.contains("escape"), "the link survived: {target}");
+        // Asserted as "landed where the link points", not as "the link's name
+        // is absent from the string". The first spelling of this test used the
+        // latter and could never pass, because the fixture directory is itself
+        // named `...-escape-outside` -- a reminder that a substring check on a
+        // path is answering a question about text, not about location.
+        let canonical_outside = match super::canonicalize(&outside) {
+            Some(path) => path,
+            None => unreachable!("the outside directory must canonicalize"),
+        };
+        assert!(
+            Path::new(target).starts_with(&canonical_outside),
+            "the ancestor was not canonicalized: {target}"
+        );
 
         // The retained shortcut keeps the link in the path, so the result still
         // reads as sitting under the worktree.
