@@ -258,3 +258,58 @@ unchanged: same offsets, same floor, same errors.
 - It does not make criterion 4's mutation gate meaningful on its own. That takes
   flipping the job from advisory to blocking, which only a verified
   zero-survivor state justifies.
+
+## The unmeasured crates, measured (2026-08-08)
+
+The job is scoped to the four decision crates, on the workflow's stated
+reasoning that "the CLI and adapter are mostly I/O plumbing whose mutants are
+dominated by unobservable output differences, and including them would bury the
+signal". That was an assumption, and the audit-gate defect fixed in `ed1f957`
+lived in `ofw-cli` — a crate the job cannot see — so it was worth converting
+into a number.
+
+Measured on a branch via `workflow_dispatch`, leaving `main` untouched:
+**788 mutants, 509 caught, 168 missed, 109 unviable, 2 timeouts, 9 minutes.**
+
+| crate | missed | total | in scope today |
+| --- | --- | --- | --- |
+| `ofw-adapter-codex` | 68 | 222 | no |
+| `ofw-cli` | 44 | 190 | no |
+| `ofw-contracts` | 29 | 46 | no |
+| `ofw-audit` | 27 | 63 | no |
+| `ofw-core`, `ofw-intent`, `ofw-policy`, `ofw-resolve` | **0** | 267 | yes |
+
+**The measurement splits the assumption in half.** It says nothing either way
+about the CLI and adapter until their 112 survivors are read — that claim
+remains untested. But it refutes the scoping for the other two outright,
+because the stated reason never applied to them: `ofw-contracts` and `ofw-audit`
+are not I/O plumbing, and between them they hold 56 survivors in code the rest
+of the system's guarantees rest on.
+
+What is unmeasured there, by function:
+
+- `ofw-audit`: `AuditSink::append` (7), `AuditEvent::validate` (5),
+  `LockGuard::is_stale` (5), `quarantine_partial_record` (2), `rotate` (1).
+  These are the integrity of the audit trail itself — and "a mutation with no
+  trail is refused" is only as good as the trail. `LockGuard::is_stale` decides
+  when an exclusive lock may be broken, which is the concurrency guarantee.
+- `ofw-contracts`: `hex_nibble` (7), `Digest::of` (3), `Digest::value` and
+  `algorithm` (4) — the digest the revalidation fingerprint is built from — plus
+  `PolicyLayer::is_external` (3), the guard that stops a supplied bundle
+  claiming the built-in layer, and `validate_identifier` (2). The remainder are
+  accessors and `Display` impls.
+
+`ofw_audit::gate` does **not** appear: it is fully covered. That is worth saying
+because it is the function that decides whether a mutation may proceed at all,
+and the natural assumption on seeing "audit is unmeasured" is that the gate was
+too.
+
+**Two timeouts**, both `+=` → `*=` in `ofw-adapter-codex`'s parser
+(`consume_digit`, `skip_whitespace`) — a mutated loop counter that stops
+advancing. A timeout is not a survivor but it is not a kill either; the job
+treats it as a failure for that reason.
+
+**Status:** measured, not yet acted on. Widening `main` requires killing the
+survivors first, because the job blocks. The scoped-down step this measurement
+justifies is `ofw-contracts` and `ofw-audit`; the CLI and adapter stay out with
+a number behind the decision rather than an assumption.
