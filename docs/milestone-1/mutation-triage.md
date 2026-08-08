@@ -333,3 +333,69 @@ and one was a test that tested nothing:
 `ofw-cli` and `ofw-adapter-codex` stay out with **112 unread survivors** between
 them. That is a recorded number, not a claim that they are clean, and reading it
 is the next widening.
+
+## Reading the last 112 (2026-08-08)
+
+The two crates still outside the gate were excluded on the claim that they are
+I/O plumbing whose mutants are dominated by unobservable output differences.
+Half that claim was already refuted. Reading the survivors refutes the rest for
+one crate and partly vindicates it for the other.
+
+**`ofw-adapter-codex`: 68 survivors, and 27 of them are in the hand-written JSON
+parser** — `parse_escape` (5), `parse_unicode_escape` (7), `parse_number` (6),
+`parse_value` (2), `parse_object`, `parse_array`, `parse_string`,
+`parse_hex_quad`, `parse_nullable_string`. This is the parser that reads
+attacker-influenced bytes off the wire before anything else in the system sees
+them. It is not plumbing, and its survivors are not output differences. Two are
+worth naming individually:
+
+- deleting the `0x00..=0x1f` arm in `parse_string` **widens** what the parser
+  accepts, admitting raw control characters inside JSON strings;
+- deleting the `"`, `/`, `b`, `f` and `r` arms in `parse_escape` makes the
+  parser refuse valid JSON — fail-closed, and still a parser that no longer
+  reads its own format.
+
+The rest are 7 in `Debug for PreToolUseEnvelope` (the redaction surface), 9 in
+error mapping and `safe_message`, and 10 in field accessors.
+
+**`ofw-cli`: 44 survivors, and 28 of them are in one function** — `timestamp`.
+The other 16 are scattered singles across 11 functions. So the "diffuse output
+noise" reading does not describe this crate either: it describes one untested
+function that happens to produce every audit record's `occurred_at`, plus a thin
+scatter. A wrong timestamp in an audit trail is not nothing.
+
+### Two mutants here are provably unkillable, and that is new
+
+`parse_unicode_escape` combines a shifted high surrogate with a low surrogate,
+and `parse_hex_quad` combines a shifted accumulator with the next digit. Both
+use `|`, and in both the two operands are **bit-disjoint by construction** — the
+shift clears exactly the bits the other operand can occupy. So `|` and `^` are
+the same function there.
+
+Checked exhaustively rather than by inspection: over all 1 048 576 surrogate
+pairs and all accumulator/digit pairs, `|` and `^` disagree on **zero** inputs.
+`|` → `&` is a different matter and is killable, since it collapses the result.
+
+This is the first genuine equivalent mutant in this repository, and it breaks an
+assumption this document and the workflow both state: that a survivor always
+means a missing test, so the disposition is always *kill*. That held for all 46
+of the original survivors. It cannot hold for these two — no input distinguishes
+them, so no test can.
+
+**This needs an operator decision rather than a unilateral one**, because the
+available repairs each cost something the project has so far refused:
+
+1. `.cargo/mutants.toml` with a narrowly scoped `exclude_re`. The workflow
+   currently says adding an exclusion to go green is "the one repair that is not
+   available" — written about real survivors, and an equivalent mutant is a
+   different case, but the distinction is exactly the kind that erodes.
+2. Rewrite the expressions so the disjointness is explicit — for instance
+   `checked_add` or explicit masking — which makes the mutants non-equivalent at
+   the cost of changing working parser code to satisfy a tool.
+3. Leave `ofw-adapter-codex` out of the gate. Honest, and it leaves the JSON
+   parser unmeasured, which is the opposite of what reading these survivors
+   argues for.
+
+Until that is decided, the adapter stays out of the blocking gate. The 27 parser
+survivors are worth killing on their own merits regardless of which repair is
+chosen — only the last two are blocked on it.
