@@ -26,7 +26,7 @@ prerequisite is done, not whether the claim can be made — it cannot.
 | 1 | Executable passing evidence for every included functional requirement | **Partial** |
 | 2 | Every unsupported or incomplete recognized mutation is `indeterminate` and the hook denies | **Met** |
 | 3 | Windows, Linux, macOS resolver matrices pass without assuming platform defaults | **Partial** |
-| 4 | Red-first, negative, abuse, property, fuzz, mutation, concurrency, deadline and performance gates pass | **Partial** |
+| 4 | Red-first, negative, abuse, property, fuzz, mutation, concurrency, deadline and performance gates pass | **Met** |
 | 5 | No audit/debug/error fixture leaks canary secrets or raw sensitive payloads | **Met** |
 | 6 | The `NoRestriction` advisory is resolved by executable baseline-proof enforcement | **Met** |
 | 7 | Dependency, SBOM, reproducibility, compatibility, rollback and clean-room provenance evidence is current | **Partial** |
@@ -131,7 +131,7 @@ support matrix per platform", and the gap is a `forbid(unsafe_code)` question as
 much as an effort one: Windows reparse and volume evidence needs platform
 bindings, which would need `unsafe` in this project's own crates.
 
-### 4 — Test gates: partial
+### 4 — Test gates: met
 
 Present: **164 tests; 26 retained red-first witnesses**; negative and abuse
 corpora; canary tests on the CLI streams, bundle errors and audit records;
@@ -201,10 +201,10 @@ margin, because a ratchet tuned to today's number fails on a slower runner for
 no defect.
 
 **Mutation testing** runs as of 2026-08-07, as a CI-only job so nothing is
-installed on an operator's machine. It is **advisory** (`continue-on-error`)
-and criterion 4 therefore stays partial: a gate that cannot fail is not yet a
-gate. The triage that was the precondition for flipping it has now happened —
-see below.
+installed on an operator's machine. It started **advisory**
+(`continue-on-error`), which held this criterion at partial for a day: a gate
+that cannot fail is not yet a gate. It became blocking on 2026-08-08, once the
+triage that was its precondition had happened.
 
 It justified itself on its first run. 220 mutants: 132 caught, **50 missed** —
 and the job reported *success*, because success on a `continue-on-error` job
@@ -253,10 +253,33 @@ What the triage found:
   fail-open. `clippy::indexing_slicing` is now denied workspace-wide; enabling
   it found 18 sites across seven files, all rewritten, no `allow` anywhere.
 
-**The criterion stays partial**, for one reason only: the job is still
-`continue-on-error`, and a gate that cannot fail is not yet a gate. Flipping it
-requires a clean mutation run on a head that contains all of the above, which is
-a CI cycle away rather than a judgement away.
+**The job is blocking as of 2026-08-08**, which is what moves this criterion to
+met. Two things had to change together and the second was the load-bearing one:
+`continue-on-error` meant a failure did not fail the workflow, and `|| true` on
+the command meant there was no failure to propagate in the first place.
+Removing only the first would have produced a job that looks blocking and cannot
+fail — worse than an honest advisory one, and the same trap already recorded
+here as "a green CI job can mean nothing".
+
+Both halves were verified rather than assumed. The shell was run locally against
+stubs: a stub exiting 2 makes the step exit 2, a stub exiting 0 makes it exit 0,
+and the old `|| true` form exits 0 for both. `cargo mutants` exits 0 only when
+every viable mutant was caught, 2 when some survived, 3 on timeout and 4 on a
+failing baseline — read from its documentation, not recalled — so re-raising the
+status blocks on all four, which is right: a timeout and an unrunnable baseline
+both mean the run measured nothing.
+
+Confirmed on run
+[31229806391](https://github.com/jared0565/operation-firewall/actions/runs/31229806391):
+**211 mutants, 173 caught, 38 unviable, zero missed, zero timed out**, job
+`mutation`, all six jobs green.
+
+**What this does not cover, stated rather than left to be inferred.** The
+mutation job is scoped to the four decision crates. `ofw-cli`,
+`ofw-adapter-codex`, `ofw-audit` and `ofw-contracts` are **unmeasured, not
+clean** — the scoping is deliberate and recorded in the workflow, but a reader
+who takes "mutation testing passes" to mean "the whole workspace is mutation
+tested" would be wrong. Widening it is future work, not a defect in this claim.
 
 Every guard added in this milestone was verified load-bearing by weakening it
 alone and confirming the matching test reds — not merely by the suite passing.
