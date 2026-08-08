@@ -1091,8 +1091,8 @@ fn invalid_json() -> EnvelopeError {
 mod tests {
     use super::{
         AdapterAssessment, AdapterError, EnvelopeAssessment, EnvelopeErrorCode, ExtractedToolInput,
-        JsonRootKind, MAX_ENVELOPE_BYTES, MAX_JSON_NESTING_DEPTH, MAX_TOOL_COMMAND_BYTES,
-        ToolInputAssessment, ToolInputErrorCode, assess_pre_tool_use,
+        JsonRootKind, MAX_ARRAY_ELEMENTS, MAX_ENVELOPE_BYTES, MAX_JSON_NESTING_DEPTH,
+        MAX_TOOL_COMMAND_BYTES, ToolInputAssessment, ToolInputErrorCode, assess_pre_tool_use,
         assess_supported_pre_tool_use, extract_tool_input, parse_pre_tool_use,
     };
 
@@ -1629,6 +1629,106 @@ mod tests {
             assert!(
                 parse_pre_tool_use(with(refused).as_bytes()).is_err(),
                 "a nullable field must refuse {refused}"
+            );
+        }
+    }
+
+    /// Substitutes a whole `tool_input` value into the reference envelope.
+    fn envelope_with_tool_input(value: &str) -> String {
+        let replaced = VALID.replace(
+            r#""tool_input":{"command":"git status","unicode":"\uD83D\uDD12"}"#,
+            &format!(r#""tool_input":{value}"#),
+        );
+        assert_ne!(replaced, VALID, "the tool_input fixture must apply");
+        replaced
+    }
+
+    /// The nesting bound is enforced through objects, not only through arrays.
+    ///
+    /// The existing depth test nests arrays. That left `parse_object`'s own
+    /// depth increment unconstrained -- mutating it to `depth - 1` or
+    /// `depth * 1` means object nesting never counts toward the limit, so a
+    /// document nested arbitrarily deep in objects recurses until the stack
+    /// runs out. A stack overflow in this binary aborts the process, and the
+    /// Codex host reads anything that is not exit 2 as permission to proceed.
+    #[test]
+    fn the_nesting_bound_is_enforced_through_objects_as_well_as_arrays() {
+        let nested_object = |depth: usize| {
+            let mut value = String::from("1");
+            for _ in 0..depth {
+                value = format!(r#"{{"a":{value}}}"#);
+            }
+            value
+        };
+
+        // `tool_input` is itself one level, so the payload may nest one fewer.
+        let at_limit = envelope_with_tool_input(&nested_object(MAX_JSON_NESTING_DEPTH - 2));
+        assert!(
+            parse_pre_tool_use(at_limit.as_bytes()).is_ok(),
+            "nesting within the limit must parse"
+        );
+
+        for excess in [1, 2, 16] {
+            let over = envelope_with_tool_input(&nested_object(MAX_JSON_NESTING_DEPTH + excess));
+            assert!(
+                parse_pre_tool_use(over.as_bytes()).is_err(),
+                "object nesting {excess} past the limit must be refused"
+            );
+        }
+    }
+
+    /// The array-element bound is enforced, which needs the counter to count.
+    ///
+    /// `elements += 1` mutated to `*=` leaves the counter at zero forever, so
+    /// the bound never fires and an array of any length is accepted. Nothing
+    /// noticed, because no test had ever built an array past the limit.
+    #[test]
+    fn the_array_element_bound_is_enforced() {
+        let array = |count: usize| {
+            let elements = vec!["1"; count].join(",");
+            format!(r#"{{"command":"git status","a":[{elements}]}}"#)
+        };
+
+        assert!(
+            parse_pre_tool_use(envelope_with_tool_input(&array(8)).as_bytes()).is_ok(),
+            "a short array must parse"
+        );
+        assert!(
+            parse_pre_tool_use(envelope_with_tool_input(&array(MAX_ARRAY_ELEMENTS + 1)).as_bytes())
+                .is_err(),
+            "an array past the element limit must be refused"
+        );
+    }
+
+    /// The envelope byte bound is enforced at its boundary.
+    ///
+    /// Only the over-limit case was covered, so tightening the comparison by
+    /// one -- refusing an envelope of exactly the documented size -- changed
+    /// nothing any test could see.
+    #[test]
+    fn the_envelope_byte_bound_holds_at_its_boundary() {
+        // Padded with whitespace between tokens, not inside a string.
+        // A 256 KiB string trips the JSON string bound long before the
+        // envelope bound, so the fixture would be refused for a reason
+        // the test is not about -- the same wrong-layer trap as sizing a
+        // command fixture past the token limit.
+        let padded_to = |total: usize| {
+            let filler = total - VALID.len();
+            VALID.replacen("{", &format!("{}{}", "{", " ".repeat(filler)), 1)
+        };
+
+        let at_limit = padded_to(MAX_ENVELOPE_BYTES);
+        assert_eq!(at_limit.len(), MAX_ENVELOPE_BYTES, "the fixture is exact");
+        assert!(
+            parse_pre_tool_use(at_limit.as_bytes()).is_ok(),
+            "an envelope of exactly the limit must parse"
+        );
+
+        for excess in [1, 2, 4_096] {
+            let over = padded_to(MAX_ENVELOPE_BYTES + excess);
+            assert!(
+                parse_pre_tool_use(over.as_bytes()).is_err(),
+                "an envelope {excess} bytes over the limit must be refused"
             );
         }
     }
