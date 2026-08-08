@@ -157,6 +157,213 @@ fn an_unbounded_or_malformed_timestamp_is_refused() {
     }
 }
 
+/// Replaces the reference bundle's timestamp, keeping everything else valid.
+fn bundle_issued_at(issued_at: &str) -> String {
+    bundle_with(DENY_FORCE_PUSH).replace(
+        r#""issued_at": "2026-08-07T00:00:00Z""#,
+        &format!(r#""issued_at": "{issued_at}""#),
+    )
+}
+
+/// Every structural check on the timestamp is load-bearing on its own.
+///
+/// Five of the six branches of `validate_issued_at` survived a mutation run.
+/// The existing coverage above refuses malformed timestamps, but every case it
+/// uses is wrong in more than one way at once, so no single check had to work:
+/// `"yesterday"` fails the digit scan at its very first index and never reaches
+/// the separator checks below it.
+///
+/// The cases here are wrong in exactly one way each, which is what it takes to
+/// hold an individual condition. Each separator is checked in isolation because
+/// the real `||` chain is satisfied by any one of them failing -- turning one
+/// into `&&` leaves a document that is refused only when two separators are
+/// wrong together, and nothing here was noticing that.
+#[test]
+fn each_timestamp_check_refuses_on_its_own() {
+    // Shorter than the shortest accepted form. Under a mutation of the floor
+    // this does not merely load -- it reaches `bytes[11]` on a ten-byte string
+    // and panics, and a panic in this binary is exit 101, which the Codex host
+    // treats as fail-open. See docs/milestone-1/mutation-triage.md.
+    for truncated in ["2026-08-07", "2026-08-07T00:00:0"] {
+        assert_eq!(
+            parse(&bundle_issued_at(truncated)),
+            Err(BundleError::InvalidIssuedAt),
+            "a timestamp of {} bytes is below the shortest accepted form",
+            truncated.len()
+        );
+    }
+
+    // One separator wrong at a time, everything else valid.
+    for broken in [
+        "2026x08-07T00:00:00Z",
+        "2026-08x07T00:00:00Z",
+        "2026-08-07x00:00:00Z",
+        "2026-08-07T00x00:00Z",
+        "2026-08-07T00:00x00Z",
+    ] {
+        assert_eq!(
+            parse(&bundle_issued_at(broken)),
+            Err(BundleError::InvalidIssuedAt),
+            "one wrong separator is enough: {broken}"
+        );
+    }
+
+    // A byte that is neither graphic nor a space, in a string that is
+    // otherwise exactly the right shape. Non-ASCII rather than a control
+    // character because a raw control byte is not legal inside a JSON string
+    // and would be refused as malformed syntax before reaching the check
+    // under test -- the wrong layer, and the fixture would prove nothing.
+    assert_eq!(
+        parse(&bundle_issued_at("2026-08-07T00:00:00é")),
+        Err(BundleError::InvalidIssuedAt),
+        "a byte that is neither graphic nor a space is refused"
+    );
+
+    // The length bound, pinned from below as well as above. 35 bytes is the
+    // longest accepted form and it is a real timestamp, not padding.
+    const LONGEST_TIMESTAMP: usize = 35;
+    let longest = "2026-08-07T00:00:00.123456789+00:00";
+    assert_eq!(longest.len(), LONGEST_TIMESTAMP, "the fixture is exact");
+    assert!(
+        parse(&bundle_issued_at(longest)).is_ok(),
+        "a timestamp of exactly the limit is accepted"
+    );
+    for excess in [1, 2, LONGEST_TIMESTAMP] {
+        let over = format!("{longest}{}", "0".repeat(excess));
+        assert_eq!(
+            parse(&bundle_issued_at(&over)),
+            Err(BundleError::InvalidIssuedAt),
+            "a timestamp {excess} bytes over the limit must be refused"
+        );
+    }
+}
+
+/// The document and array bounds are enforced at their boundaries.
+///
+/// Same shape as every other bound in this workspace: a single over-limit case
+/// is satisfied by a mutation that refuses *only* that value and lets
+/// everything larger through, so each bound is pinned from below and from far
+/// above.
+///
+/// The over-limit cases assert `TooManyValues` specifically rather than "some
+/// error". The policy types re-check these bounds themselves, so a bundle that
+/// gets past the loader's check is still refused -- by a later guard, reported
+/// as a different error. Accepting any error here would let the loader's own
+/// bound rot while the test kept passing.
+#[test]
+fn the_bundle_and_array_bounds_hold_at_their_boundaries() {
+    // The reference document plus trailing whitespace, which JSON ignores.
+    let padded_to = |total: usize| {
+        let document = bundle_with(DENY_FORCE_PUSH);
+        let padding = " ".repeat(total - document.len());
+        format!("{document}{padding}")
+    };
+    let at_limit = padded_to(MAX_BUNDLE_BYTES);
+    assert_eq!(at_limit.len(), MAX_BUNDLE_BYTES, "the fixture is exact");
+    assert!(
+        parse(&at_limit).is_ok(),
+        "a bundle of exactly the limit is accepted"
+    );
+    for excess in [1, 2, 4_096] {
+        assert_eq!(
+            parse(&padded_to(MAX_BUNDLE_BYTES + excess)),
+            Err(BundleError::TooLarge),
+            "a bundle {excess} bytes over the limit must be refused"
+        );
+    }
+
+    // `unique_set`'s bound, reached through `risk_categories`.
+    const MAX_NAME_SET: usize = 64;
+    let with_risk_categories = |count: usize| {
+        let categories: Vec<String> = (0..count)
+            .map(|index| format!(r#""git.risk{index}""#))
+            .collect();
+        DENY_FORCE_PUSH.replace(
+            r#"["git.history_loss"]"#,
+            &format!("[{}]", categories.join(",")),
+        )
+    };
+    assert!(
+        parse(&bundle_with(&with_risk_categories(MAX_NAME_SET))).is_ok(),
+        "exactly the limit is accepted"
+    );
+    for excess in [1, 2, MAX_NAME_SET] {
+        assert_eq!(
+            parse(&bundle_with(&with_risk_categories(MAX_NAME_SET + excess))),
+            Err(BundleError::TooManyValues),
+            "{excess} risk categories over the limit must be refused"
+        );
+    }
+
+    // The safer-alternatives bound, which the loader checks directly.
+    const MAX_SAFER_ALTERNATIVES: usize = 8;
+    let with_alternatives = |count: usize| {
+        let alternatives: Vec<String> = (0..count)
+            .map(|index| format!(r#""Alternative {index}""#))
+            .collect();
+        DENY_FORCE_PUSH.replace(
+            r#"["Use --force-with-lease"]"#,
+            &format!("[{}]", alternatives.join(",")),
+        )
+    };
+    assert!(
+        parse(&bundle_with(&with_alternatives(MAX_SAFER_ALTERNATIVES))).is_ok(),
+        "exactly the limit is accepted"
+    );
+    for excess in [1, 2, MAX_SAFER_ALTERNATIVES] {
+        assert_eq!(
+            parse(&bundle_with(&with_alternatives(
+                MAX_SAFER_ALTERNATIVES + excess
+            ))),
+            Err(BundleError::TooManyValues),
+            "{excess} safer alternatives over the limit must be refused"
+        );
+    }
+}
+
+/// Every reason a bundle failed to load renders as distinct, non-empty text.
+///
+/// A refusal to load is never a weaker policy, so the operator's only question
+/// is *why* -- and "not valid JSON" and "does not match the v1 contract" are
+/// different repairs. An empty or shared message makes them the same message.
+#[test]
+fn every_bundle_error_renders_a_distinct_message() {
+    let all = [
+        BundleError::TooLarge,
+        BundleError::NotUtf8,
+        BundleError::MalformedSyntax,
+        BundleError::MalformedShape,
+        BundleError::UnsupportedSchemaVersion,
+        BundleError::InvalidIssuedAt,
+        BundleError::EmptySelectorValues,
+        BundleError::DuplicateValue,
+        BundleError::TooManyValues,
+        BundleError::Invalid(ofw_policy::PolicyError::InvalidRationale),
+    ];
+
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for error in all.clone() {
+        let rendered = match error {
+            // Exhaustive on purpose. A variant added later stops compiling here
+            // until it is named, so this test cannot silently fall behind the
+            // enum it claims to cover.
+            BundleError::TooLarge
+            | BundleError::NotUtf8
+            | BundleError::MalformedSyntax
+            | BundleError::MalformedShape
+            | BundleError::UnsupportedSchemaVersion
+            | BundleError::InvalidIssuedAt
+            | BundleError::EmptySelectorValues
+            | BundleError::DuplicateValue
+            | BundleError::TooManyValues
+            | BundleError::Invalid(_) => error.to_string(),
+        };
+        assert!(!rendered.is_empty(), "{error:?} renders nothing");
+        assert!(seen.insert(rendered), "{error:?} shares another message");
+    }
+    assert_eq!(seen.len(), all.len());
+}
+
 /// Diagnostics must not echo the policy file.
 ///
 /// Negative/abuse test rather than a red-first witness: `BundleError` carries

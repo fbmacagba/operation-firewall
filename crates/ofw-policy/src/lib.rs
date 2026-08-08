@@ -539,8 +539,8 @@ mod tests {
 
     use super::{
         EffectivePolicy, EffectiveRuleIdentity, Fact, MAX_BUNDLES, MAX_EFFECTIVE_RULES,
-        MAX_RULES_PER_BUNDLE, OperationFacts, PolicyError, PolicyEvaluation, PolicyOutcome,
-        RestrictionRule, Selectors, ValidatedPolicyBundle,
+        MAX_RULES_PER_BUNDLE, MAX_SELECTOR_VALUES, OperationFacts, PolicyError, PolicyEvaluation,
+        PolicyOutcome, RestrictionRule, Selectors, ValidatedPolicyBundle,
     };
 
     fn identifier(value: &str) -> Identifier {
@@ -608,6 +608,28 @@ mod tests {
             Ok(policy) => policy,
             Err(error) => unreachable!("test policy must be valid: {error:?}"),
         }
+    }
+
+    /// The outcome of a single deny rule carrying exactly these selectors.
+    fn outcome_for(selectors: Selectors) -> PolicyOutcome {
+        let scoped = match RestrictionRule::new(
+            identifier("scoped"),
+            Restriction::Deny,
+            selectors,
+            BTreeSet::from([name("policy.scope")]),
+            "Scoped to one dimension.",
+            Vec::new(),
+        ) {
+            Ok(rule) => rule,
+            Err(error) => unreachable!("test rule must be valid: {error:?}"),
+        };
+        policy(vec![bundle(
+            PolicyLayer::Organization,
+            "org.scoped",
+            vec![scoped],
+        )])
+        .evaluate(&complete_facts())
+        .outcome
     }
 
     #[test]
@@ -784,6 +806,188 @@ mod tests {
         );
     }
 
+    /// Each selector dimension narrows a rule on its own.
+    ///
+    /// Nine mutants survived a mutation run all saying the same thing: nothing
+    /// asserted that a rule scoped by `target_kinds`, `environments`,
+    /// `reversibility` or `blast_radius` *fails* to match facts outside its
+    /// scope. Those dimensions were built and composed in tests, but replacing
+    /// a builder with a no-op, or one of `applicability`'s `||` with `&&`,
+    /// changed no result any test could see. `operation_kinds` and
+    /// `operation_effects` were already covered, which is why their equivalents
+    /// died and these did not.
+    ///
+    /// The direction is worth naming. All but one of the nine make a rule apply
+    /// *more* widely -- a production-scoped deny firing in a local repository
+    /// -- which produces extra denies rather than extra allows. That is the
+    /// safe direction and it is still a defect: a rule that does not mean what
+    /// it says is a rule nobody can reason about. The exception is dropping the
+    /// negation inside `matches_set`, which would stop a rule scoped to a
+    /// target kind from applying to that kind at all.
+    #[test]
+    fn each_selector_dimension_narrows_on_its_own() {
+        // Each pair selects, and then declines to select, the corresponding
+        // value in `complete_facts`.
+        let dimensions = [
+            (
+                "operation kind",
+                Selectors::default().with_operation_kinds([name("git.force_update")]),
+                Selectors::default().with_operation_kinds([name("git.push")]),
+            ),
+            (
+                "operation effect",
+                Selectors::default().with_operation_effects([OperationEffect::Update]),
+                Selectors::default().with_operation_effects([OperationEffect::Delete]),
+            ),
+            (
+                "target kind",
+                Selectors::default().with_target_kinds([name("git.repository")]),
+                Selectors::default().with_target_kinds([name("git.worktree_path")]),
+            ),
+            (
+                "environment",
+                Selectors::default().with_environments([EnvironmentClass::Local]),
+                Selectors::default().with_environments([EnvironmentClass::Production]),
+            ),
+            (
+                "reversibility",
+                Selectors::default().with_reversibility([Reversibility::ConditionallyRecoverable]),
+                Selectors::default().with_reversibility([Reversibility::Irreversible]),
+            ),
+            (
+                "blast radius",
+                Selectors::default().with_blast_radius([BlastRadius::Single]),
+                Selectors::default().with_blast_radius([BlastRadius::Broad]),
+            ),
+        ];
+
+        for (dimension, matching, non_matching) in dimensions {
+            assert_eq!(
+                outcome_for(matching),
+                PolicyOutcome::Deny,
+                "a rule selecting the {dimension} of the facts must apply"
+            );
+            assert_eq!(
+                outcome_for(non_matching),
+                PolicyOutcome::NoRestriction,
+                "a rule selecting a different {dimension} must not apply"
+            );
+        }
+    }
+
+    /// A rule that selects nothing selects everything, and is refused.
+    ///
+    /// `is_empty` is the whole of what stands between an unscoped rule and a
+    /// policy where one rule silently governs every operation. Broader than
+    /// intended, so more denies rather than more allows -- and still not a rule
+    /// its author could have meant to write.
+    #[test]
+    fn a_rule_that_selects_nothing_is_rejected() {
+        assert!(Selectors::default().is_empty());
+        assert!(!Selectors::for_operation_kind(name("git.force_update")).is_empty());
+
+        let unscoped = RestrictionRule::new(
+            identifier("selects-everything"),
+            Restriction::Deny,
+            Selectors::default(),
+            BTreeSet::from([name("policy.scope")]),
+            "A rule with no selectors at all.",
+            Vec::new(),
+        );
+        assert!(matches!(unscoped, Err(PolicyError::EmptySelectors)));
+    }
+
+    /// The effective policy can name every rule it holds.
+    ///
+    /// This list is what an audit record uses to say which rules were in force
+    /// for a decision. An empty one changes no outcome and leaves the record
+    /// unable to say what governed it, which is the difference between an audit
+    /// trail and a log line.
+    #[test]
+    fn the_effective_policy_names_every_rule_it_holds() {
+        let effective = policy(vec![
+            bundle(
+                PolicyLayer::Organization,
+                "org.baseline",
+                vec![rule("deny-force-update", Restriction::Deny)],
+            ),
+            bundle(
+                PolicyLayer::Repository,
+                "repo.local",
+                vec![rule("ask-force-update", Restriction::Ask)],
+            ),
+        ]);
+
+        let identities = effective.rule_identities();
+        assert_eq!(identities.len(), 2);
+        for (layer, rule_id) in [
+            (PolicyLayer::Organization, "deny-force-update"),
+            (PolicyLayer::Repository, "ask-force-update"),
+        ] {
+            assert!(
+                identities
+                    .iter()
+                    .any(|identity| identity.layer == layer
+                        && identity.rule_id == identifier(rule_id)),
+                "{rule_id} must be named"
+            );
+        }
+    }
+
+    /// The canonical-path-prefix bounds are enforced at their boundaries.
+    ///
+    /// An empty prefix is a prefix of every path, so a rule carrying one is not
+    /// the rule its author wrote -- which is why emptiness and length are
+    /// checked with `||` rather than treated as one condition.
+    #[test]
+    fn the_canonical_path_prefix_bounds_hold_at_their_boundaries() {
+        // Both limits are written as literals in the builder rather than named
+        // constants, so they are repeated here rather than imported.
+        const LONGEST_PREFIX: usize = 4_096;
+        const MOST_PREFIXES: usize = 64;
+        let base = || Selectors::for_operation_kind(name("git.force_update"));
+
+        assert!(matches!(
+            base().with_canonical_path_prefixes([String::new()]),
+            Err(PolicyError::InvalidCanonicalPathPrefix)
+        ));
+
+        assert!(
+            base()
+                .with_canonical_path_prefixes(["a".repeat(LONGEST_PREFIX)])
+                .is_ok(),
+            "a prefix of exactly the limit is accepted"
+        );
+        // One over and far over: an `==` mutation refuses only the first of
+        // these and leaves every longer prefix unbounded.
+        for excess in [1, 2, LONGEST_PREFIX] {
+            assert!(
+                matches!(
+                    base().with_canonical_path_prefixes(["a".repeat(LONGEST_PREFIX + excess)]),
+                    Err(PolicyError::InvalidCanonicalPathPrefix)
+                ),
+                "a prefix {excess} bytes over the limit must be refused"
+            );
+        }
+
+        let prefixes = |count: usize| (0..count).map(|index| format!("/repo/path{index}"));
+        assert!(
+            base()
+                .with_canonical_path_prefixes(prefixes(MOST_PREFIXES))
+                .is_ok(),
+            "exactly the limit is accepted"
+        );
+        for excess in [1, 2, MOST_PREFIXES] {
+            assert!(
+                matches!(
+                    base().with_canonical_path_prefixes(prefixes(MOST_PREFIXES + excess)),
+                    Err(PolicyError::TooManyCanonicalPathPrefixes)
+                ),
+                "{excess} prefixes over the limit must be refused"
+            );
+        }
+    }
+
     #[test]
     fn selector_and_target_fact_bounds_are_enforced() {
         let excessive_selector_values = (0..=64).map(|index| name(&format!("target.kind{index}")));
@@ -801,6 +1005,43 @@ mod tests {
             rule_result,
             Err(PolicyError::TooManySelectorValues)
         ));
+
+        // Both selector dimensions the bound covers, pinned from below and from
+        // far above. Only the one-over case existed, and an `==` mutation still
+        // rejects exactly that while letting every larger set through -- the
+        // check stops being a bound while the test that names it still passes.
+        let bounded = |kinds: usize, targets: usize| {
+            RestrictionRule::new(
+                identifier("bounded-selectors"),
+                Restriction::Deny,
+                Selectors::default()
+                    .with_operation_kinds((0..kinds).map(|index| name(&format!("git.kind{index}"))))
+                    .with_target_kinds(
+                        (0..targets).map(|index| name(&format!("target.kind{index}"))),
+                    ),
+                BTreeSet::from([name("policy.resource_exhaustion")]),
+                "Bounded selector sets.",
+                Vec::new(),
+            )
+        };
+        assert!(
+            bounded(MAX_SELECTOR_VALUES, MAX_SELECTOR_VALUES).is_ok(),
+            "exactly the limit on both dimensions is accepted"
+        );
+        for excess in [1, 2, MAX_SELECTOR_VALUES] {
+            for (kinds, targets) in [
+                (MAX_SELECTOR_VALUES + excess, MAX_SELECTOR_VALUES),
+                (MAX_SELECTOR_VALUES, MAX_SELECTOR_VALUES + excess),
+            ] {
+                assert!(
+                    matches!(
+                        bounded(kinds, targets),
+                        Err(PolicyError::TooManySelectorValues)
+                    ),
+                    "{kinds} kinds and {targets} target kinds must be refused"
+                );
+            }
+        }
 
         let excessive_target_kinds = (0..=256)
             .map(|index| name(&format!("target.kind{index}")))
@@ -932,6 +1173,18 @@ mod tests {
         ));
         // The retained unbounded form accepts the same input.
         assert!(vulnerable_unbounded_compose(&excess_bundles).is_ok());
+
+        // Exactly the limit composes. The guard runs inside the loop after each
+        // insert, so the count passes through every value on its way up: both
+        // mutations of the comparison fire one bundle early and still refuse
+        // the over-limit fixture above, looking correct while refusing a policy
+        // set the documentation says is acceptable.
+        let at_limit: Vec<_> = excess_bundles.into_iter().take(MAX_BUNDLES).collect();
+        assert_eq!(at_limit.len(), MAX_BUNDLES);
+        assert!(
+            EffectivePolicy::compose(at_limit).is_ok(),
+            "exactly MAX_BUNDLES bundles compose"
+        );
     }
 
     #[test]
