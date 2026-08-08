@@ -127,9 +127,22 @@ jobs:
 
       - name: Mutate the decision core
         # Scoped to the crates where a surviving mutant means a missing
-        # security assertion. The CLI and adapter are mostly I/O plumbing whose
-        # mutants are dominated by unobservable output differences, and
-        # including them would bury the signal.
+        # security assertion, which as of 2026-08-08 is six of the eight.
+        #
+        # The scope used to be four, on the reasoning that the remaining crates
+        # are I/O plumbing whose mutants are dominated by unobservable output
+        # differences. That was never measured, and the audit-gate defect fixed
+        # in ed1f957 lived in one of the excluded crates. Measuring it (see
+        # docs/milestone-1/mutation-triage.md) showed the reasoning never
+        # applied to ofw-contracts or ofw-audit at all: they are the contract
+        # types and the audit trail, not plumbing, and they held 56 survivors
+        # including the digest the revalidation fingerprint is built from and
+        # the rule deciding when an exclusive lock may be broken. Those are
+        # killed and both crates are in scope.
+        #
+        # ofw-cli and ofw-adapter-codex stay out with 112 unread survivors
+        # between them. That is a number rather than an assumption now, and
+        # reading it is the next widening -- not a claim that they are clean.
         #
         # `--no-shuffle` keeps the order stable so two runs are comparable.
         #
@@ -151,6 +164,8 @@ jobs:
             --package ofw-policy \
             --package ofw-intent \
             --package ofw-resolve \
+            --package ofw-contracts \
+            --package ofw-audit \
             --output mutants-report
           status=$?
           set -e
