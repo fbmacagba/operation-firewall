@@ -358,8 +358,8 @@ mod tests {
     };
 
     use super::{
-        ACTIVE_SEGMENT, AuditSink, LOCK_STALE_AFTER, MAX_RECORD_BYTES, MAX_SEGMENT_BYTES,
-        SinkError, elapsed_is_stale, should_rotate,
+        ACTIVE_SEGMENT, AuditSink, LOCK_STALE_AFTER, LockGuard, MAX_RECORD_BYTES,
+        MAX_SEGMENT_BYTES, SinkError, elapsed_is_stale, should_rotate,
     };
 
     /// Written numerically so no fixture in this module needs an escape.
@@ -422,6 +422,13 @@ mod tests {
         // half, the first append to a fresh sink closes an empty segment and a
         // reader cannot tell rotation from data loss.
         assert!(!should_rotate(0, MAX_RECORD_BYTES));
+        // Large enough to pass the size half on its own. The case above
+        // cannot: a record is bounded well under a segment, so with `existing`
+        // at zero the size half was false anyway, the emptiness half went
+        // untested, and an `>=` mutation of it survived. `existing >= 0` is
+        // always true for an unsigned count, so that mutation deletes the
+        // emptiness guard outright.
+        assert!(!should_rotate(0, MAX_SEGMENT_BYTES as usize + 1));
         assert!(!should_rotate(0, 1));
 
         // A non-empty segment rotates only once the line would take it past the
@@ -652,5 +659,59 @@ mod tests {
                 "a record {excess} bytes over the limit must be refused"
             );
         }
+    }
+
+    /// A lock file's age decides whether it may be broken, and the filesystem
+    /// supplies that age.
+    ///
+    /// `elapsed_is_stale` holds the rule; this holds the reading of it. Both
+    /// are needed and neither substitutes for the other: with the rule alone,
+    /// `is_stale` could return a constant and the boundary test would still
+    /// pass. A mutation run showed exactly that -- `-> true` and `-> false`
+    /// both survived every test of the rule.
+    ///
+    /// The two constants fail in opposite directions, and both are bad.
+    /// Always-stale means any lock may be broken, so two processes append at
+    /// once and the exclusivity the sink depends on is gone. Never-stale means
+    /// a lock left by a killed process strands every later decision behind it
+    /// forever, and a firewall that cannot record cannot permit a mutation.
+    ///
+    /// The old modification time comes from `File::set_times`, which is `std`,
+    /// so this needs no dependency and no waiting.
+    #[test]
+    fn a_lock_is_stale_only_once_it_is_older_than_the_timeout() {
+        let directory = directory("stale");
+
+        // A lock that is not there cannot be stale -- and cannot be broken.
+        let absent = directory.join("no-such.lock");
+        let _ = std::fs::remove_file(&absent);
+        assert!(!LockGuard::is_stale(&absent));
+
+        // A lock just created is held, not abandoned.
+        let fresh = directory.join("fresh.lock");
+        write(&fresh, b"held");
+        assert!(!LockGuard::is_stale(&fresh));
+
+        // A lock older than the timeout is abandoned and may be broken.
+        let old = directory.join("old.lock");
+        write(&old, b"abandoned");
+        let handle = match std::fs::OpenOptions::new().write(true).open(&old) {
+            Ok(handle) => handle,
+            Err(error) => unreachable!("the test lock must be openable: {error}"),
+        };
+        let long_ago = match std::time::SystemTime::now()
+            .checked_sub(LOCK_STALE_AFTER + Duration::from_secs(60))
+        {
+            Some(instant) => instant,
+            None => unreachable!("the clock must support a time before now"),
+        };
+        match handle.set_times(std::fs::FileTimes::new().set_modified(long_ago)) {
+            Ok(()) => {}
+            Err(error) => unreachable!("the test lock's mtime must be settable: {error}"),
+        }
+        assert!(
+            LockGuard::is_stale(&old),
+            "a lock older than the timeout must be breakable"
+        );
     }
 }
