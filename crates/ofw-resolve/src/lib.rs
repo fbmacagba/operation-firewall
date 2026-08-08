@@ -891,7 +891,7 @@ mod tests {
         ConfigurationError, Digest, FingerprintChange, MAX_CONFIGURATION_BYTES, MAX_PATH_BYTES,
         MAX_PATH_SEGMENTS, ResolutionError, Revalidation, RevalidationFingerprint, TargetScope,
         TrustedConfiguration, bounded_utf8, environment_from_label, frame, parse_configuration,
-        permissions_are_exclusive, resolve, revalidate, target_scope,
+        permissions_are_exclusive, resolve, resolve_write_path, revalidate, target_scope,
     };
 
     /// Creates a real directory under the system temporary directory.
@@ -1903,6 +1903,77 @@ mod tests {
                 Err(error) => unreachable!("{lines:?} must resolve: {error}"),
             };
             assert_eq!(resolved.context().reversibility, expected, "{lines:?}");
+        }
+    }
+
+    /// A patch kind arriving with no path is the same contradiction as a
+    /// `git status` arriving with one.
+    ///
+    /// Unreachable through the grammar, which refuses a document with no
+    /// operations — so this is asserted against `target_scope` directly rather
+    /// than through `resolve`. That is the point: the function must hold for
+    /// the input the grammar happens not to produce today, because the
+    /// agreement between the two layers is an assumption, and the whole reason
+    /// `target_scope` reads the operand count is that assumptions between
+    /// layers are what this check exists to catch.
+    #[test]
+    fn a_patch_kind_with_no_paths_is_a_contradiction() {
+        for kind in [
+            "patch.add_file",
+            "patch.update_file",
+            "patch.delete_file",
+            "patch.move_file",
+        ] {
+            assert_eq!(
+                target_scope(kind, 0),
+                Err(ResolutionError::OperandsUnexpectedForKind),
+                "{kind} with no paths"
+            );
+            // ...and with paths it is a write scope, so the arm above is not
+            // simply refusing the kind outright.
+            assert!(target_scope(kind, 1).is_ok(), "{kind} with a path");
+        }
+    }
+
+    /// The ancestor walk is bounded, and the bound holds at its boundary.
+    ///
+    /// Asserted against `resolve_write_path` directly, because a path deep
+    /// enough to trip this bound also trips `bounded_utf8`'s segment check on
+    /// the way out of `resolve` — so through the public path both mutations
+    /// produce an error either way and the bound would look tested while being
+    /// untestable. The walk's own bound has to answer for itself.
+    ///
+    /// The discriminating case is one component past the limit, not two: the
+    /// bound is checked *after* the ancestor canonicalizes, so a walk that ends
+    /// exactly at the limit returns before the check is reached.
+    #[test]
+    fn the_ancestor_walk_bound_holds_at_its_boundary() {
+        let working = directory("write-walk");
+        let canonical = match super::canonicalize(&working) {
+            Some(path) => path,
+            None => unreachable!("the test working directory must canonicalize"),
+        };
+        let deep = |components: usize| {
+            let mut parts = vec!["c"; components.saturating_sub(1)];
+            parts.push("x");
+            parts.join("/")
+        };
+
+        assert!(
+            resolve_write_path(&canonical, &deep(MAX_PATH_SEGMENTS)).is_ok(),
+            "a walk of exactly the limit resolves"
+        );
+        assert!(
+            resolve_write_path(&canonical, &deep(MAX_PATH_SEGMENTS + 1)).is_ok(),
+            "a walk one past the limit still resolves, because the last step \
+             finds the working directory before the bound is consulted"
+        );
+        for excess in [2, 3, MAX_PATH_SEGMENTS] {
+            assert_eq!(
+                resolve_write_path(&canonical, &deep(MAX_PATH_SEGMENTS + excess)),
+                Err(ResolutionError::TooManyPathSegments),
+                "a walk {excess} components over the limit must be refused"
+            );
         }
     }
 
