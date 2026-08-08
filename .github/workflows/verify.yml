@@ -77,29 +77,29 @@ jobs:
         run: python -B scripts/verify.py
 
   mutation:
-    name: mutation (advisory)
+    name: mutation
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
-    # Advisory, and deliberately so on its first outing. Completion criterion 4
-    # names mutation testing, and this is the evidence for it -- but a surviving
-    # mutant is not automatically a defect. Some are equivalent mutations, and
-    # some land in code whose behaviour genuinely is not observable from
-    # outside. Failing the build on the first run would mean triaging a wall of
-    # unreviewed output under pressure to make it green, which is how a gate
-    # gets weakened rather than satisfied.
+    # Blocking as of 2026-08-08. It started advisory on purpose: a surviving
+    # mutant is not automatically a defect, and failing the build on the first
+    # run would have meant triaging a wall of unreviewed output under pressure
+    # to make it green, which is how a gate gets weakened rather than satisfied.
     #
-    # `continue-on-error` is the honest setting for that, and the report is
-    # uploaded so the survivors can be read and either killed with a test or
-    # recorded as equivalent. It should be flipped to blocking once the
-    # survivor list has been triaged once.
+    # That triage has now happened -- all 46 survivors killed, none excluded or
+    # suppressed, see docs/milestone-1/mutation-triage.md -- and a run at zero
+    # survivors is what makes blocking meaningful rather than punitive.
     #
-    # NOT verified locally before being added: `cargo-mutants` is not installed
-    # on the authoring machine and installing it writes outside the repository,
-    # which this project's operator has to authorise. So the first run of this
-    # job is also its first test -- stated here rather than discovered later.
-
-    continue-on-error: true
+    # Two things had to change together, and the second is the one that was
+    # actually load-bearing. `continue-on-error` meant a failure did not fail
+    # the workflow; `|| true` on the command meant there was no failure to
+    # propagate in the first place. Removing only the first would have produced
+    # a job that looks blocking and cannot fail, which is worse than an honest
+    # advisory one.
+    #
+    # If a future change strands a survivor, the fix is a test that kills it.
+    # `.cargo/mutants.toml` does not exist and adding an exclusion to make this
+    # green is the one repair that is not available.
 
     defaults:
       run:
@@ -132,13 +132,37 @@ jobs:
         # including them would bury the signal.
         #
         # `--no-shuffle` keeps the order stable so two runs are comparable.
+        #
+        # The exit status is held and re-raised at the end rather than allowed
+        # to abort the step, so the report is printed even when the job fails --
+        # a failing gate that does not say what failed sends the next reader to
+        # the artifact when the answer could have been in the log.
+        #
+        # `cargo mutants` exits 0 only when every viable mutant was caught, 2
+        # when some survived, 3 on a test timeout and 4 when the baseline was
+        # already failing (mutants.rs/exit-codes.html, read rather than
+        # recalled). Re-raising the status therefore blocks on all four, which
+        # is right: a timeout and an unrunnable baseline are both "this run
+        # measured nothing", and a gate must not pass on that.
         run: |
-          cargo mutants --no-shuffle --timeout 120             --package ofw-core             --package ofw-policy             --package ofw-intent             --package ofw-resolve             --output mutants-report             || true
-          echo "::group::surviving mutants"
-          cat mutants-report/mutants.out/caught.txt 2>/dev/null | head -5 || true
+          set +e
+          cargo mutants --no-shuffle --timeout 120 \
+            --package ofw-core \
+            --package ofw-policy \
+            --package ofw-intent \
+            --package ofw-resolve \
+            --output mutants-report
+          status=$?
+          set -e
+
+          echo "::group::mutation outcome"
           echo "--- missed ---"
           cat mutants-report/mutants.out/missed.txt 2>/dev/null || echo "none recorded"
+          echo "--- timeout ---"
+          cat mutants-report/mutants.out/timeout.txt 2>/dev/null || echo "none recorded"
           echo "::endgroup::"
+
+          exit "$status"
 
       - name: Upload the mutation report
         if: always()
