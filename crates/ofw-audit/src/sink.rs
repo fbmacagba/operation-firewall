@@ -43,6 +43,36 @@ use std::time::{Duration, SystemTime};
 
 use crate::{AuditError, AuditEvent, AuditHealth};
 
+/// Whether appending a line of this size should rotate the active segment
+/// first.
+///
+/// Separated from the filesystem so the rule itself is testable without
+/// writing eight megabytes, exactly as `permissions_are_exclusive` is separated
+/// from the syscall that supplies its input. Both conditions are load-bearing
+/// and they fail differently: without the size check a segment grows without
+/// bound, and without the `existing > 0` check an empty segment rotates on its
+/// first write, producing an empty closed segment and a reader who cannot tell
+/// rotation from data loss.
+#[must_use]
+pub const fn should_rotate(existing: u64, line: usize) -> bool {
+    let projected = existing.saturating_add(line as u64);
+    existing > 0 && projected > MAX_SEGMENT_BYTES
+}
+
+/// Whether a lock held for this long may be broken.
+///
+/// Separated for the same reason: asserting the stale branch through the
+/// filesystem would need control over a file's modification time, so the rule
+/// would go untested and only the "fresh" answer would ever be observed.
+///
+/// Breaking a lock too early lets two processes append at once; breaking it too
+/// late strands every later decision behind a dead process. Neither direction
+/// is safe, which is why the boundary is pinned rather than the direction.
+#[must_use]
+pub const fn elapsed_is_stale(elapsed: Duration) -> bool {
+    elapsed.as_secs() > LOCK_STALE_AFTER.as_secs()
+}
+
 /// The active segment. Closed segments are numbered beside it.
 const ACTIVE_SEGMENT: &str = "audit.jsonl";
 const LOCK_FILE: &str = "audit.lock";
@@ -177,8 +207,7 @@ impl AuditSink {
         let existing = std::fs::metadata(&path)
             .map(|metadata| metadata.len())
             .unwrap_or(0);
-        let projected = existing.saturating_add(line.len() as u64);
-        if existing > 0 && projected > MAX_SEGMENT_BYTES {
+        if should_rotate(existing, line.len()) {
             self.rotate(&path)?;
         }
 
@@ -293,9 +322,7 @@ impl LockGuard {
         let Ok(modified) = metadata.modified() else {
             return false;
         };
-        modified
-            .elapsed()
-            .is_ok_and(|elapsed| elapsed > LOCK_STALE_AFTER)
+        modified.elapsed().is_ok_and(elapsed_is_stale)
     }
 }
 
@@ -317,4 +344,313 @@ pub fn read_segment(path: &Path) -> Vec<String> {
         .filter(|line| !line.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use ofw_contracts::{EnvironmentClass, Identifier};
+
+    use crate::{
+        AuditEvent, AuditHealth, AuditOutcome, Digest, EventType, Health, REDACTION_PROFILE_ID,
+        REDACTION_PROFILE_VERSION, Redaction, SCHEMA_VERSION, Source,
+    };
+
+    use super::{
+        ACTIVE_SEGMENT, AuditSink, LOCK_STALE_AFTER, MAX_RECORD_BYTES, MAX_SEGMENT_BYTES,
+        SinkError, elapsed_is_stale, should_rotate,
+    };
+
+    /// Written numerically so no fixture in this module needs an escape.
+    const NEWLINE: u8 = 10;
+
+    fn directory(label: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!("ofw-sink-{}-{label}", std::process::id()));
+        match std::fs::create_dir_all(&path) {
+            Ok(()) => path,
+            Err(error) => unreachable!("test directory must be creatable: {error}"),
+        }
+    }
+
+    /// One complete record: a body and the newline that terminates it.
+    fn record(body: &str) -> Vec<u8> {
+        let mut bytes = body.as_bytes().to_vec();
+        bytes.push(NEWLINE);
+        bytes
+    }
+
+    fn sink_in(directory: &std::path::Path) -> AuditSink {
+        match AuditSink::open(directory, None) {
+            Ok(sink) => sink,
+            Err(error) => unreachable!("the sink must open: {error}"),
+        }
+    }
+
+    fn write(path: &std::path::Path, bytes: &[u8]) {
+        match std::fs::write(path, bytes) {
+            Ok(()) => {}
+            Err(error) => unreachable!("test file must be writable: {error}"),
+        }
+    }
+
+    fn read(path: &std::path::Path) -> Vec<u8> {
+        match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) => unreachable!("test file must be readable: {error}"),
+        }
+    }
+
+    /// The bounds are the sizes they are documented to be.
+    ///
+    /// Written as products (`8 * 1024 * 1024`), and a mutation run replaced the
+    /// multiplication with addition in both. Nothing noticed, because nothing
+    /// ever compared them to a number -- an 8 MiB segment bound silently
+    /// becoming 1 033 bytes would have rotated on almost every append.
+    #[test]
+    fn the_documented_bounds_are_the_sizes_they_claim() {
+        assert_eq!(MAX_SEGMENT_BYTES, 8_388_608);
+        assert_eq!(MAX_RECORD_BYTES, 65_536);
+        assert_eq!(LOCK_STALE_AFTER, Duration::from_secs(120));
+    }
+
+    /// Both halves of the rotation rule are load-bearing, and they differ.
+    #[test]
+    fn rotation_needs_a_non_empty_segment_and_an_overflowing_one() {
+        // An empty segment never rotates, however large the line. Without this
+        // half, the first append to a fresh sink closes an empty segment and a
+        // reader cannot tell rotation from data loss.
+        assert!(!should_rotate(0, MAX_RECORD_BYTES));
+        assert!(!should_rotate(0, 1));
+
+        // A non-empty segment rotates only once the line would take it past the
+        // bound -- pinned at the boundary and one either side, because `==` and
+        // `>=` mutations of the comparison each move it by exactly one.
+        assert!(
+            !should_rotate(MAX_SEGMENT_BYTES - 1, 1),
+            "landing exactly on the bound is not past it"
+        );
+        assert!(should_rotate(MAX_SEGMENT_BYTES, 1), "one byte past");
+        assert!(should_rotate(MAX_SEGMENT_BYTES - 1, 2), "two bytes past");
+        assert!(!should_rotate(1, 1), "far under the bound");
+
+        // Saturating rather than wrapping: a line that would overflow a u64
+        // must rotate, not wrap to a small projection and skip rotation.
+        assert!(should_rotate(u64::MAX, usize::MAX));
+    }
+
+    /// The staleness boundary is pinned on both sides.
+    ///
+    /// Breaking a lock too early lets two processes append at once; breaking it
+    /// too late strands every later decision behind a dead process. Neither
+    /// direction is safe, so the boundary is asserted rather than a direction.
+    #[test]
+    fn the_lock_staleness_boundary_holds_on_both_sides() {
+        let timeout = LOCK_STALE_AFTER.as_secs();
+        assert!(!elapsed_is_stale(Duration::from_secs(0)));
+        assert!(!elapsed_is_stale(Duration::from_secs(timeout - 1)));
+        assert!(
+            !elapsed_is_stale(Duration::from_secs(timeout)),
+            "a lock held for exactly the timeout is not yet stale"
+        );
+        assert!(elapsed_is_stale(Duration::from_secs(timeout + 1)));
+        assert!(elapsed_is_stale(Duration::from_secs(timeout * 100)));
+    }
+
+    /// Rotation renames the active segment rather than reporting success.
+    ///
+    /// `rotate` returning `Ok(())` without moving anything survived every test,
+    /// because rotation was only ever observed through `append`, which reports
+    /// the same success either way. The evidence that matters is on disk.
+    #[test]
+    fn rotation_moves_the_active_segment_aside() {
+        let directory = directory("rotate");
+        let sink = sink_in(&directory);
+        let active = directory.join(ACTIVE_SEGMENT);
+        let closed = directory.join("audit.1.jsonl");
+        let _ = std::fs::remove_file(&closed);
+        let contents = record(r#"{"a":1}"#);
+        write(&active, &contents);
+
+        match sink.rotate(&active) {
+            Ok(()) => {}
+            Err(error) => unreachable!("rotation must succeed: {error}"),
+        }
+        assert!(!active.exists(), "the active segment was not moved");
+        assert!(closed.exists(), "the closed segment was not created");
+        assert_eq!(read(&closed), contents, "the records must survive intact");
+    }
+
+    /// Quarantine splits after the last complete record, not before it.
+    ///
+    /// The split index is `position_of_last_newline + 1`. Mutating that `+ 1`
+    /// to `-` or `*` moves the boundary onto or past the newline, which either
+    /// strands a newline at the head of the quarantine file or -- worse --
+    /// leaves a partial record in the active segment while reporting the damage
+    /// handled.
+    #[test]
+    fn quarantine_splits_after_the_last_complete_record() {
+        let directory = directory("quarantine");
+        let sink = sink_in(&directory);
+        let active = directory.join(ACTIVE_SEGMENT);
+
+        let intact = record(r#"{"intact":1}"#);
+        let damaged = r#"{"trunc"#.as_bytes();
+        let mut contents = intact.clone();
+        contents.extend_from_slice(damaged);
+        write(&active, &contents);
+
+        match sink.quarantine_partial_record() {
+            Ok(true) => {}
+            other => unreachable!("a damaged trailing record must be quarantined: {other:?}"),
+        }
+
+        assert_eq!(
+            read(&active),
+            intact,
+            "the intact record must survive whole, its newline included"
+        );
+
+        let quarantined: Vec<_> = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("audit.quarantine."))
+                })
+                .collect(),
+            Err(error) => unreachable!("the directory must be readable: {error}"),
+        };
+        assert_eq!(quarantined.len(), 1, "exactly one quarantine file");
+        let Some(path) = quarantined.first() else {
+            unreachable!("exactly one quarantine file")
+        };
+        assert_eq!(
+            read(path),
+            damaged,
+            "the damaged bytes are kept exactly, with no newline taken from the intact record"
+        );
+    }
+
+    /// Every sink error renders as distinct, non-empty text.
+    #[test]
+    fn every_sink_error_renders_a_distinct_message() {
+        let all = [
+            SinkError::DirectoryUnusable,
+            SinkError::DirectoryInsideRepository,
+            SinkError::LockUnavailable,
+            SinkError::RecordTooLarge,
+            SinkError::WriteFailed,
+            SinkError::RotationFailed,
+            SinkError::QuarantinedPriorRecord,
+        ];
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for error in all {
+            let rendered = match error {
+                // Exhaustive: a variant added later stops compiling here.
+                SinkError::DirectoryUnusable
+                | SinkError::DirectoryInsideRepository
+                | SinkError::LockUnavailable
+                | SinkError::RecordTooLarge
+                | SinkError::WriteFailed
+                | SinkError::RotationFailed
+                | SinkError::QuarantinedPriorRecord => error.to_string(),
+            };
+            assert!(!rendered.is_empty(), "{error:?} renders nothing");
+            assert!(seen.insert(rendered), "{error:?} shares another message");
+        }
+        assert_eq!(seen.len(), all.len());
+    }
+
+    /// A minimal event whose serialized length can be tuned exactly.
+    ///
+    /// `occurred_at` is the pad: it is a plain ASCII `String`, so each added
+    /// character adds exactly one byte to the JSON line and none of it needs
+    /// escaping.
+    fn event_padded_to(bytes: usize) -> AuditEvent {
+        let identifier = match Identifier::new("turn-1") {
+            Ok(value) => value,
+            Err(error) => unreachable!("test identifier must be valid: {error}"),
+        };
+        let mut event = AuditEvent {
+            schema_version: SCHEMA_VERSION,
+            event_id: String::new(),
+            occurred_at: String::new(),
+            event_type: EventType::Evaluated,
+            operation_id: None,
+            decision_id: None,
+            correlation_id: identifier,
+            actor_ref: Digest::of(b"actor"),
+            session_ref: Digest::of(b"session"),
+            source: Source {
+                host: "codex",
+                protocol: "codex.pre_tool_use",
+                adapter_id: "ofw.codex",
+                tool_name: "Bash",
+            },
+            operation: None,
+            target_refs: Vec::new(),
+            environment: EnvironmentClass::Local,
+            outcome: AuditOutcome::Deny,
+            policy_snapshot_digest: None,
+            determining_rule_refs: Vec::new(),
+            health: Health {
+                enforcement: AuditHealth::Unhealthy,
+                audit: AuditHealth::Healthy,
+                coverage: AuditHealth::Unhealthy,
+            },
+            redaction: Redaction {
+                profile_id: REDACTION_PROFILE_ID,
+                profile_version: REDACTION_PROFILE_VERSION,
+                redacted_field_count: 0,
+                canary_scan: "clean",
+            },
+        };
+        let base = match event.to_json_line() {
+            Ok(line) => line.len(),
+            Err(error) => unreachable!("the fixture must serialize: {error}"),
+        };
+        assert!(base <= bytes, "the fixture is already larger than {bytes}");
+        event.occurred_at = "0".repeat(bytes - base);
+        event
+    }
+
+    /// The record-size bound is enforced at its boundary.
+    ///
+    /// A record too large to write is an audit failure, never a truncated
+    /// record -- a truncated record is indistinguishable from a crash-damaged
+    /// one, and the recovery path would quarantine it as damage. Nothing pinned
+    /// the boundary, so two mutations of the comparison survived: `==` refuses
+    /// only the single byte past the limit and admits everything larger, which
+    /// is the shape that stops a bound being a bound.
+    #[test]
+    fn the_record_size_bound_holds_at_its_boundary() {
+        let directory = directory("record-bound");
+        let sink = sink_in(&directory);
+        let active = directory.join(ACTIVE_SEGMENT);
+        let _ = std::fs::remove_file(&active);
+
+        let at_limit = event_padded_to(MAX_RECORD_BYTES);
+        match at_limit.to_json_line() {
+            Ok(line) => assert_eq!(line.len(), MAX_RECORD_BYTES, "the fixture is exact"),
+            Err(error) => unreachable!("the fixture must serialize: {error}"),
+        }
+        match sink.append(&at_limit) {
+            Ok(()) => {}
+            Err(error) => unreachable!("a record of exactly the limit must append: {error}"),
+        }
+
+        // One over and far over: an `==` mutation refuses only the first.
+        for excess in [1, 2, 1_024] {
+            let over = event_padded_to(MAX_RECORD_BYTES + excess);
+            assert_eq!(
+                sink.append(&over),
+                Err(SinkError::RecordTooLarge),
+                "a record {excess} bytes over the limit must be refused"
+            );
+        }
+    }
 }
