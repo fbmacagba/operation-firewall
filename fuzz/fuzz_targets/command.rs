@@ -22,7 +22,10 @@ use libfuzzer_sys::fuzz_target;
 /// crash in the parser.
 fn interpreted_kinds() -> &'static [&'static str] {
     match ofw_intent::GRAMMAR_REVISION {
-        "1.1.0" => &["git.status", "git.rev_parse", "git.log", "git.diff"],
+        // 1.2.0 added the apply-patch subset, which has its own entry
+        // point and its own target; the shell subset it widened by
+        // nothing, and this arm restates that rather than sharing one.
+        "1.2.0" => &["git.status", "git.rev_parse", "git.log", "git.diff"],
         _ => &[],
     }
 }

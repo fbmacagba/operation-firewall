@@ -115,10 +115,26 @@ const AUDIT_UNAVAILABLE_FOR_MUTATION: Reason = Reason {
 
 /// The audit sink's health.
 ///
-/// Persistence is not implemented, so there is no sink and the honest value is
-/// `unhealthy`. It is reported rather than assumed: an operator reading
-/// `audit: unhealthy` knows that a mutation would be refused today, which is
-/// the behaviour they would otherwise discover the first time one mattered.
+/// `Unhealthy` because this pipeline constructs no sink — **not** because
+/// persistence is unimplemented. It is implemented: `ofw-audit` appends under
+/// an exclusive lock, rotates segments by atomic rename, and quarantines a
+/// damaged trailing record on recovery. What is missing is the wiring, and the
+/// wiring needs a decision this pipeline cannot make for itself, because
+/// `TrustedConfiguration` carries no audit directory and choosing one by
+/// default would put an audit trail somewhere the operator did not name.
+///
+/// The comment here previously said persistence did not exist. That stopped
+/// being true on 2026-08-07 and the constant kept its old justification, which
+/// is how a stale reason outlives the condition it described.
+///
+/// The consequence is worth stating plainly, because it is large and it is not
+/// a bug: **every mutation this build interprets is refused on this line**,
+/// whatever its merits. `ofw doctor` reports `audit: unhealthy` rather than
+/// leaving that to be discovered the first time a mutation mattered. It also
+/// means the apply-patch decision path cannot be exercised end-to-end through
+/// the binary today — the gate intercepts before the outcome is reached — so
+/// its behaviour is established by the crate-level tests instead, and honestly
+/// labelled as such.
 const AUDIT_HEALTH: AuditHealth = AuditHealth::Unhealthy;
 
 /// Proven, and the built-in baseline asks. Milestone 2 resolves an ask inside
@@ -345,11 +361,9 @@ pub fn assess(input: &[u8], context: &AssessmentContext<'_>) -> Assessment {
         ExtractedToolInput::Bash(bash) => {
             interpret_and_resolve(bash.command(), context.configuration)
         }
-        // The apply-patch grammar is a separate slice.
-        ExtractedToolInput::ApplyPatch(_) => Stage::Blocked {
-            reason: INTERPRETATION_UNSUPPORTED,
-            operation_kind: None,
-        },
+        ExtractedToolInput::ApplyPatch(patch) => {
+            interpret_patch_and_resolve(patch.patch(), context.configuration)
+        }
     };
 
     match stage {
@@ -425,11 +439,53 @@ fn interpret_and_resolve(command: &str, configuration: Option<&TrustedConfigurat
         _ => return blocked_stage(INTERPRETATION_UNSUPPORTED, None),
     };
 
+    resolve_and_prove(&candidate, operation_kind, configuration)
+}
+
+/// Interprets one apply-patch document and resolves its targets.
+///
+/// Same shape as the Bash path and deliberately not merged with it: the two
+/// grammars take different inputs and refuse for disjoint reasons, and a shared
+/// entry point would need a match that could route a patch through the shell
+/// interpreter or the reverse. What they *do* share is everything after
+/// classification, which is [`resolve_and_prove`].
+fn interpret_patch_and_resolve(
+    document: &str,
+    configuration: Option<&TrustedConfiguration>,
+) -> Stage {
+    let candidate = match ofw_intent::interpret_patch(document) {
+        ofw_intent::PatchClassification::Unsupported(_) => {
+            return blocked_stage(INTERPRETATION_UNSUPPORTED, None);
+        }
+        ofw_intent::PatchClassification::Supported(candidate) => candidate,
+    };
+
+    let operation_kind = match candidate.operation_kind().as_str() {
+        "patch.add_file" => "patch.add_file",
+        "patch.update_file" => "patch.update_file",
+        "patch.delete_file" => "patch.delete_file",
+        "patch.move_file" => "patch.move_file",
+        _ => return blocked_stage(INTERPRETATION_UNSUPPORTED, None),
+    };
+
+    resolve_and_prove(&candidate, operation_kind, configuration)
+}
+
+/// Everything after classification, shared by both grammars.
+///
+/// The operation kind is a compiled-in literal chosen by the caller rather than
+/// borrowed from the interpreter's output, so no payload-derived string can
+/// reach stdout, stderr or an audit record.
+fn resolve_and_prove(
+    candidate: &ofw_intent::IntentCandidate,
+    operation_kind: &'static str,
+    configuration: Option<&TrustedConfiguration>,
+) -> Stage {
     let Some(configuration) = configuration else {
         return blocked_stage(TRUSTED_CONFIGURATION_MISSING, Some(operation_kind));
     };
 
-    let resolved = match ofw_resolve::resolve(&candidate, configuration) {
+    let resolved = match ofw_resolve::resolve(candidate, configuration) {
         Ok(resolved) => resolved,
         Err(error) => return blocked_stage(resolution_reason(error), Some(operation_kind)),
     };
@@ -439,7 +495,7 @@ fn interpret_and_resolve(command: &str, configuration: Option<&TrustedConfigurat
         Err(_) => return blocked_stage(INTERNAL_FAILURE, Some(operation_kind)),
     };
 
-    let evidence = evidence_from_intent(&candidate, resolved.context(), grammar_revision);
+    let evidence = evidence_from_intent(candidate, resolved.context(), grammar_revision);
     match SupportedOperationProof::new(evidence) {
         Ok(proof) => Stage::Proven {
             operation_kind,

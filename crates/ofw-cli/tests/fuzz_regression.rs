@@ -35,7 +35,10 @@ use std::path::{Path, PathBuf};
 /// `cargo test`.
 fn interpreted_kinds() -> &'static [&'static str] {
     match ofw_intent::GRAMMAR_REVISION {
-        "1.1.0" => &["git.status", "git.rev_parse", "git.log", "git.diff"],
+        // 1.2.0 added the apply-patch subset, which has its own entry
+        // point and its own target; the shell subset it widened by
+        // nothing, and this arm restates that rather than sharing one.
+        "1.2.0" => &["git.status", "git.rev_parse", "git.log", "git.diff"],
         _ => &[],
     }
 }
@@ -132,6 +135,67 @@ fn every_command_seed_terminates_and_classifies_within_the_subset() {
                 );
             }
             Ok(ofw_intent::Classification::Unsupported(_)) | Err(_) => {}
+        }
+    }
+}
+
+/// The patch kinds this build interprets, pinned per grammar revision.
+///
+/// Separate from [`interpreted_kinds`] because the two grammars have separate
+/// entry points and separate revisions of meaning. Sharing one list would let a
+/// shell kind satisfy a patch assertion.
+fn patch_kinds() -> &'static [&'static str] {
+    match ofw_intent::GRAMMAR_REVISION {
+        "1.2.0" => &[
+            "patch.add_file",
+            "patch.update_file",
+            "patch.delete_file",
+            "patch.move_file",
+        ],
+        _ => &[],
+    }
+}
+
+#[test]
+fn every_patch_seed_terminates_and_classifies_within_the_subset() {
+    for (path, bytes) in corpus("patch") {
+        let Ok(document) = core::str::from_utf8(&bytes) else {
+            continue;
+        };
+        match ofw_intent::interpret_patch(document) {
+            ofw_intent::PatchClassification::Supported(candidate) => {
+                let kind = candidate.operation_kind().as_str();
+                assert!(
+                    patch_kinds().contains(&kind),
+                    "{} classified as unexpected kind {kind}",
+                    path.display()
+                );
+                // The properties the resolver is entitled to assume, replayed
+                // on stable rather than only under nightly libFuzzer. It
+                // appends missing path components without canonicalizing them,
+                // so an absolute path or a surviving traversal here would reach
+                // the containment check as text.
+                assert!(
+                    !candidate.path_candidates().is_empty(),
+                    "{} named no path",
+                    path.display()
+                );
+                for candidate_path in candidate.path_candidates() {
+                    assert!(
+                        !candidate_path.starts_with('/') && !candidate_path.starts_with('\\'),
+                        "{} yielded an absolute path {candidate_path}",
+                        path.display()
+                    );
+                    for component in candidate_path.split(['/', '\\']) {
+                        assert!(
+                            component != "." && component != "..",
+                            "{} yielded a traversal component in {candidate_path}",
+                            path.display()
+                        );
+                    }
+                }
+            }
+            ofw_intent::PatchClassification::Unsupported(_) => {}
         }
     }
 }

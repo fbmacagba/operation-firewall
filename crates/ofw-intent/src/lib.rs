@@ -49,10 +49,17 @@ use ofw_contracts::{NamespacedName, OperationEffect};
 /// covers the same ground, because a `1.1.0` proof may be about specific paths
 /// rather than about a whole repository.
 ///
-/// `interpreted_subset_is_pinned` pins the subset per revision, so a widening
-/// cannot reach green without a bump and a bump cannot reach green without its
-/// subset written out.
-pub const GRAMMAR_REVISION: &str = "1.1.0";
+/// Raised to `1.2.0` on 2026-08-08 for the apply-patch subset. The largest
+/// widening so far and the one a reader most needs to distinguish: a `1.1.0`
+/// proof is always about a read, and a `1.2.0` proof may be about a create,
+/// update, delete or move. A reader holding the older revision and assuming it
+/// still describes the same ground would be assuming the operation cannot
+/// write.
+///
+/// `interpreted_subset_is_pinned` and `interpreted_patch_subset_is_pinned` pin
+/// the subset per revision, so a widening cannot reach green without a bump and
+/// a bump cannot reach green without its subset written out.
+pub const GRAMMAR_REVISION: &str = "1.2.0";
 
 pub const MAX_COMMAND_BYTES: usize = 65_536;
 pub const MAX_TOKENS: usize = 512;
@@ -602,8 +609,8 @@ mod tests {
     use super::{
         Classification, ExecutionSurfaceRisk, GRAMMAR_REVISION, INTERPRETED_SUBCOMMANDS,
         IntentCandidate, MAX_COMMAND_BYTES, MAX_PATH_OPERANDS, MAX_TOKEN_BYTES, MAX_TOKENS,
-        OperandGrammar, PrivilegeRisk, PublicationRisk, ShellError, UnsupportedReason, classify,
-        interpret, tokenize,
+        OperandGrammar, PatchClassification, PrivilegeRisk, PublicationRisk, ShellError,
+        UnsupportedReason, classify, interpret, interpret_patch, tokenize,
     };
     use ofw_contracts::OperationEffect;
 
@@ -649,7 +656,13 @@ mod tests {
             .collect();
 
         let expected = match GRAMMAR_REVISION {
-            "1.1.0" => vec![
+            // 1.2.0 added the apply-patch subset, which is a separate grammar
+            // with its own entry point and its own pin
+            // (`interpreted_patch_subset_is_pinned`). It widened nothing here,
+            // and this arm says so by listing exactly what 1.1.0 listed --
+            // written out rather than shared with the arm above, because
+            // "unchanged" is a claim worth restating per revision.
+            "1.2.0" => vec![
                 (
                     "status",
                     "git.status",
@@ -696,6 +709,71 @@ mod tests {
              security decision per field: bump GRAMMAR_REVISION and add an arm \
              above rather than editing this one"
         );
+    }
+
+    /// The apply-patch subset is pinned per revision, like the shell one.
+    ///
+    /// A patch grammar has no flag allowlist to enumerate, so what is pinned is
+    /// the set of operation kinds it can produce and the effect each one
+    /// carries. That is the pair a reader of a proof depends on: the kind names
+    /// what happened and the effect says how consequential it was, and a change
+    /// to either is a change to what a proof at this revision means.
+    #[test]
+    fn interpreted_patch_subset_is_pinned() {
+        let declared = patch_kinds_and_effects();
+
+        let expected = match GRAMMAR_REVISION {
+            // Absent before 1.2.0: `interpret_patch` did not exist, and a
+            // 1.1.0 proof therefore cannot be about a write.
+            "1.2.0" => vec![
+                ("patch.add_file", OperationEffect::Create),
+                ("patch.update_file", OperationEffect::Update),
+                ("patch.delete_file", OperationEffect::Delete),
+                ("patch.move_file", OperationEffect::Move),
+            ],
+            other => unreachable!(
+                "grammar revision {other} has no pinned patch subset: write out \
+                 the operation kinds this revision can produce and the effect \
+                 each carries, one arm per revision"
+            ),
+        };
+
+        assert_eq!(
+            declared, expected,
+            "widening the apply-patch subset is a grammar revision: bump \
+             GRAMMAR_REVISION and add an arm above rather than editing this one"
+        );
+    }
+
+    /// Every kind `interpret_patch` can produce, with the effect it carries.
+    ///
+    /// Derived by interpreting a document per kind rather than read from a
+    /// table, so a kind that stopped being reachable would drop out of this
+    /// list and fail the pin -- which a table lookup would not notice.
+    fn patch_kinds_and_effects() -> Vec<(&'static str, OperationEffect)> {
+        let documents = [
+            "*** Begin Patch\n*** Add File: a.txt\n+x\n*** End Patch\n",
+            "*** Begin Patch\n*** Update File: a.txt\n@@\n+x\n*** End Patch\n",
+            "*** Begin Patch\n*** Delete File: a.txt\n*** End Patch\n",
+            "*** Begin Patch\n*** Update File: a.txt\n*** Move to: b.txt\n*** End Patch\n",
+        ];
+        let mut produced = Vec::new();
+        for document in documents {
+            match interpret_patch(document) {
+                PatchClassification::Supported(candidate) => {
+                    let kind = match candidate.operation_kind().as_str() {
+                        "patch.add_file" => "patch.add_file",
+                        "patch.update_file" => "patch.update_file",
+                        "patch.delete_file" => "patch.delete_file",
+                        "patch.move_file" => "patch.move_file",
+                        other => unreachable!("unpinned patch kind {other}"),
+                    };
+                    produced.push((kind, candidate.effect()));
+                }
+                other => unreachable!("{document:?} must classify, got {other:?}"),
+            }
+        }
+        produced
     }
 
     /// Each table entry's declared values survive the trip through `classify`.

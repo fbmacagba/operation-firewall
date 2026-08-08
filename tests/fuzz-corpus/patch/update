@@ -1,0 +1,6 @@
+*** Begin Patch
+*** Update File: src/old.rs
+@@
+-a
++b
+*** End Patch

@@ -1,0 +1,4 @@
+*** Begin Patch
+*** Add File: src/new.rs
++fn main() {}
+*** End Patch
