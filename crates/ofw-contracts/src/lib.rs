@@ -381,9 +381,186 @@ fn is_lower_identifier_segment(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        BlastRadius, ContractError, EnvironmentClass, ExternalPolicyLayer, Identifier,
-        NamespacedName, OperationEffect, Restriction, Reversibility, Version,
+        BlastRadius, ContractError, Digest, EnvironmentClass, ExternalPolicyLayer, Identifier,
+        MAX_IDENTIFIER_LENGTH, NamespacedName, OperationEffect, PolicyLayer, Restriction,
+        Reversibility, Version, hex_nibble,
     };
+
+    /// The digest is the exact SHA-256 of its input, hex-encoded.
+    ///
+    /// Pinned against a published test vector rather than against itself. Every
+    /// self-consistent assertion available here -- that two calls agree, that
+    /// different inputs differ, that the length is 64 -- passes just as well
+    /// against a wrong encoder, and a mutation run proved it: `>>` swapped for
+    /// `<<` and `&` for `|` in the encoding loop both survived, as did the
+    /// arithmetic inside `hex_nibble`.
+    ///
+    /// That matters beyond tidiness. This digest is what the revalidation
+    /// fingerprint is built from, so an encoder that collides or mislabels is a
+    /// fingerprint that can be redeemed against the wrong target set.
+    #[test]
+    fn the_digest_matches_the_published_sha256_vectors() {
+        // FIPS 180-4 / RFC 6234 worked examples.
+        let vectors = [
+            (
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                "abc",
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+            (
+                "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+                "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+            ),
+        ];
+        for (input, expected) in vectors {
+            let digest = Digest::of(input.as_bytes());
+            assert_eq!(digest.value(), expected, "input {input:?}");
+            assert_eq!(digest.algorithm(), "sha256");
+        }
+    }
+
+    /// Every nibble maps to its own hex character, across the whole range.
+    ///
+    /// `hex_nibble` is four lines of arithmetic and carried seven survivors.
+    /// Asserted exhaustively because the range is sixteen values: there is no
+    /// reason to sample a domain small enough to enumerate.
+    #[test]
+    fn every_nibble_maps_to_its_own_lowercase_hex_character() {
+        let expected = [
+            '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
+        ];
+        for (value, character) in expected.into_iter().enumerate() {
+            let nibble = u8::try_from(value).unwrap_or(u8::MAX);
+            assert_eq!(hex_nibble(nibble), character, "nibble {value}");
+        }
+    }
+
+    /// The built-in layer is the only one that is not external.
+    ///
+    /// This is the guard that stops a supplied policy bundle claiming to be the
+    /// built-in baseline. It was tested — in `ofw-policy`, one crate away —
+    /// which is why three mutations of it survived here: `cargo-mutants` runs a
+    /// mutant against its own package's tests, so this list measures whether a
+    /// crate holds its own invariants, not whether anything holds them.
+    ///
+    /// A guarantee whose only test lives in a consumer is fragile in a specific
+    /// way: the consumer's test can be rewritten for unrelated reasons and the
+    /// guarantee silently loses its last check. Asserted here as well, where it
+    /// is defined.
+    #[test]
+    fn only_the_builtin_layer_is_not_external() {
+        assert!(!PolicyLayer::Builtin.is_external());
+        for layer in [
+            PolicyLayer::Organization,
+            PolicyLayer::User,
+            PolicyLayer::Repository,
+        ] {
+            assert!(layer.is_external(), "{layer:?} is a supplied layer");
+        }
+
+        // Exhaustive on purpose: a layer added later stops compiling here until
+        // its side of this question is stated.
+        for layer in [
+            PolicyLayer::Builtin,
+            PolicyLayer::Organization,
+            PolicyLayer::User,
+            PolicyLayer::Repository,
+        ] {
+            match layer {
+                PolicyLayer::Builtin
+                | PolicyLayer::Organization
+                | PolicyLayer::User
+                | PolicyLayer::Repository => {}
+            }
+        }
+    }
+
+    /// Every accessor returns the value it was constructed from.
+    ///
+    /// Individually trivial, and collectively the reason ten mutants survived:
+    /// nothing in this crate read an accessor back and compared it to its
+    /// input, so replacing any of them with `""` or a constant changed nothing
+    /// observable here.
+    #[test]
+    fn every_accessor_returns_what_it_was_constructed_from() {
+        let identifier = match Identifier::new("org.baseline") {
+            Ok(value) => value,
+            Err(error) => unreachable!("test identifier must be valid: {error}"),
+        };
+        assert_eq!(identifier.as_str(), "org.baseline");
+        assert_eq!(String::from(identifier.clone()), "org.baseline");
+
+        let name = match NamespacedName::new("git.force_update") {
+            Ok(value) => value,
+            Err(error) => unreachable!("test name must be valid: {error}"),
+        };
+        assert_eq!(name.as_str(), "git.force_update");
+        assert_eq!(String::from(name.clone()), "git.force_update");
+
+        let version = match Version::new("1.2.0") {
+            Ok(value) => value,
+            Err(error) => unreachable!("test version must be valid: {error}"),
+        };
+        assert_eq!(version.as_str(), "1.2.0");
+        assert_eq!(String::from(version.clone()), "1.2.0");
+
+        let digest = Digest::of(b"seed");
+        assert_eq!(digest.value().len(), 64);
+        assert_ne!(digest.value(), "");
+        assert_eq!(digest.algorithm(), "sha256");
+    }
+
+    /// The identifier length bound holds at its boundary.
+    #[test]
+    fn the_identifier_length_bound_holds_at_its_boundary() {
+        let at_limit = "a".repeat(MAX_IDENTIFIER_LENGTH);
+        assert!(
+            Identifier::new(&at_limit).is_ok(),
+            "an identifier of exactly the limit is accepted"
+        );
+        // One over and far over: an `==` mutation refuses only the first.
+        for excess in [1, 2, MAX_IDENTIFIER_LENGTH] {
+            let over = "a".repeat(MAX_IDENTIFIER_LENGTH + excess);
+            assert!(
+                matches!(Identifier::new(&over), Err(ContractError::TooLong { .. })),
+                "an identifier {excess} over the limit must be refused"
+            );
+        }
+    }
+
+    /// Every contract error renders as distinct, non-empty text.
+    #[test]
+    fn every_contract_error_renders_a_distinct_message() {
+        let all = [
+            ContractError::Empty,
+            ContractError::TooLong {
+                maximum: 8,
+                actual: 9,
+            },
+            ContractError::InvalidIdentifierCharacter { index: 3 },
+            ContractError::MissingNamespace,
+            ContractError::InvalidNamespacedName,
+            ContractError::InvalidVersion,
+        ];
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for error in all.clone() {
+            let rendered = match error {
+                // Exhaustive: a variant added later stops compiling here.
+                ContractError::Empty
+                | ContractError::TooLong { .. }
+                | ContractError::InvalidIdentifierCharacter { .. }
+                | ContractError::MissingNamespace
+                | ContractError::InvalidNamespacedName
+                | ContractError::InvalidVersion => error.to_string(),
+            };
+            assert!(!rendered.is_empty(), "{error:?} renders nothing");
+            assert!(seen.insert(rendered), "{error:?} shares another message");
+        }
+        assert_eq!(seen.len(), all.len());
+    }
 
     /// The normative v1 policy-bundle contract.
     fn bundle_schema() -> serde_json::Value {

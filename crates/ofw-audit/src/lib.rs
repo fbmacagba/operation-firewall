@@ -302,9 +302,9 @@ mod tests {
     use ofw_contracts::{EnvironmentClass, Identifier, NamespacedName, OperationEffect};
 
     use super::{
-        AuditEvent, AuditGate, AuditHealth, AuditOutcome, Digest, EventType, Health, Operation,
-        REDACTION_PROFILE_ID, REDACTION_PROFILE_VERSION, Redaction, SCHEMA_VERSION, Source, gate,
-        uuid_shaped,
+        AuditError, AuditEvent, AuditGate, AuditHealth, AuditOutcome, Digest, EventType, Health,
+        MAX_DETERMINING_RULE_REFS, MAX_TARGET_REFS, Operation, REDACTION_PROFILE_ID,
+        REDACTION_PROFILE_VERSION, Redaction, SCHEMA_VERSION, Source, gate, uuid_shaped,
     };
 
     const CANARY: &str = "CANARY_SECRET_a1b2c3d4e5";
@@ -321,6 +321,109 @@ mod tests {
             Ok(value) => value,
             Err(error) => unreachable!("test name must be valid: {error}"),
         }
+    }
+
+    /// The bounds on an event's collection fields hold at their boundaries.
+    ///
+    /// An over-large event is an audit failure rather than a shorter record,
+    /// because truncating drops the evidence a reader needs. Nothing pinned
+    /// either bound, so five mutations of `validate` survived -- including
+    /// replacing the whole function with `Ok(())`, which turns "refuse to
+    /// record an unbounded event" into "record it".
+    #[test]
+    fn the_event_collection_bounds_hold_at_their_boundaries() {
+        let at_limit = |targets: usize, rules: usize| {
+            let mut event = event_from_a_secret_bearing_invocation();
+            event.target_refs = (0..targets)
+                .map(|index| Digest::of(index.to_string().as_bytes()))
+                .collect();
+            event.determining_rule_refs = (0..rules)
+                .map(|index| identifier(&format!("rule-{index}")))
+                .collect();
+            event
+        };
+
+        assert!(
+            at_limit(MAX_TARGET_REFS, MAX_DETERMINING_RULE_REFS)
+                .validate()
+                .is_ok(),
+            "exactly the limit on both is accepted"
+        );
+        // One over and far over: an `==` mutation refuses only the first and
+        // leaves everything larger unbounded.
+        for excess in [1, 2, MAX_TARGET_REFS] {
+            assert_eq!(
+                at_limit(MAX_TARGET_REFS + excess, 0).validate(),
+                Err(AuditError::TooManyTargetRefs),
+                "{excess} target refs over the limit"
+            );
+            assert_eq!(
+                at_limit(0, MAX_DETERMINING_RULE_REFS + excess).validate(),
+                Err(AuditError::TooManyDeterminingRuleRefs),
+                "{excess} rule refs over the limit"
+            );
+        }
+    }
+
+    /// Every audit error renders as distinct, non-empty text.
+    #[test]
+    fn every_audit_error_renders_a_distinct_message() {
+        let all = [
+            AuditError::TooManyTargetRefs,
+            AuditError::TooManyDeterminingRuleRefs,
+            AuditError::SerializationFailed,
+        ];
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for error in all {
+            let rendered = match error {
+                // Exhaustive: a variant added later stops compiling here.
+                AuditError::TooManyTargetRefs
+                | AuditError::TooManyDeterminingRuleRefs
+                | AuditError::SerializationFailed => error.to_string(),
+            };
+            assert!(!rendered.is_empty(), "{error:?} renders nothing");
+            assert!(seen.insert(rendered), "{error:?} shares another message");
+        }
+        assert_eq!(seen.len(), all.len());
+    }
+
+    /// Every hex digit maps to the variant nibble RFC 4122 permits for it.
+    ///
+    /// The identifier is shaped like a version-4 UUID so a reader's tooling
+    /// accepts it. The variant nibble must be one of `8`, `9`, `a`, `b`, and
+    /// which one is determined by the digest byte it replaces -- three of the
+    /// four arms carried survivors, because the existing test only checked that
+    /// the nibble was *one of* the four, which every arm satisfies.
+    #[test]
+    fn every_digest_nibble_maps_to_a_permitted_variant_nibble() {
+        let cases = [
+            (b'0', '8'),
+            (b'4', '8'),
+            (b'8', '8'),
+            (b'c', '8'),
+            (b'1', '9'),
+            (b'5', '9'),
+            (b'9', '9'),
+            (b'd', '9'),
+            (b'2', 'a'),
+            (b'6', 'a'),
+            (b'a', 'a'),
+            (b'e', 'a'),
+            (b'3', 'b'),
+            (b'7', 'b'),
+            (b'b', 'b'),
+            (b'f', 'b'),
+        ];
+        for (byte, expected) in cases {
+            assert_eq!(
+                super::variant_nibble(byte),
+                expected,
+                "digest byte {}",
+                char::from(byte)
+            );
+        }
+        // Every hex digit is covered, so no arm is reachable only by accident.
+        assert_eq!(cases.len(), 16);
     }
 
     /// An event built from an invocation that carries a secret in its command.
