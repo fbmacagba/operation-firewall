@@ -133,7 +133,7 @@ bindings, which would need `unsafe` in this project's own crates.
 
 ### 4 — Test gates: partial
 
-Present: **151 tests; 26 retained red-first witnesses**; negative and abuse
+Present: **164 tests; 26 retained red-first witnesses**; negative and abuse
 corpora; canary tests on the CLI streams, bundle errors and audit records;
 property-style monotonicity; deadline handling in the hook.
 

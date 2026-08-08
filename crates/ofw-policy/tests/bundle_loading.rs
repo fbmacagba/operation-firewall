@@ -184,7 +184,11 @@ fn each_timestamp_check_refuses_on_its_own() {
     // this does not merely load -- it reaches `bytes[11]` on a ten-byte string
     // and panics, and a panic in this binary is exit 101, which the Codex host
     // treats as fail-open. See docs/milestone-1/mutation-triage.md.
-    for truncated in ["2026-08-07", "2026-08-07T00:00:0"] {
+    // The last of these is the interesting one: a complete date and time with
+    // no zone at all. It is one byte short of the shortest accepted form, which
+    // is the only length that distinguishes the floor from an off-by-one
+    // version of itself.
+    for truncated in ["2026-08-07", "2026-08-07T00:00:0", "2026-08-07T00:00:00"] {
         assert_eq!(
             parse(&bundle_issued_at(truncated)),
             Err(BundleError::InvalidIssuedAt),
