@@ -235,22 +235,28 @@ fn validate_issued_at(value: &str) -> Result<(), BundleError> {
     if value.is_empty() || value.len() > MAX_ISSUED_AT_LENGTH {
         return Err(BundleError::InvalidIssuedAt);
     }
-    // `1970-01-01T00:00:00Z` is the shortest accepted form.
-    if value.len() < 20 {
+    // `1970-01-01T00:00:00Z` is the shortest accepted form: the shape below,
+    // plus at least one byte of zone.
+    if value.len() <= ISSUED_AT_SHAPE.len() {
         return Err(BundleError::InvalidIssuedAt);
     }
-    let bytes = value.as_bytes();
-    let digits_at = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18];
-    if digits_at
-        .iter()
-        .any(|index| !bytes[*index].is_ascii_digit())
-    {
-        return Err(BundleError::InvalidIssuedAt);
-    }
-    if bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b'T' {
-        return Err(BundleError::InvalidIssuedAt);
-    }
-    if bytes[13] != b':' || bytes[16] != b':' {
+    // Zipped against the shape rather than indexed at fixed offsets. The
+    // offsets were correct, and their correctness depended on reading the
+    // length check above together with six subscripts below it -- and in this
+    // binary an out-of-bounds panic is exit 101, which the Codex host treats as
+    // fail-open. `zip` stops at the shorter of the two, so the read cannot
+    // outrun the input whatever the guard above does.
+    let shaped = value
+        .bytes()
+        .zip(ISSUED_AT_SHAPE.iter())
+        .all(|(byte, expected)| {
+            if *expected == DIGIT {
+                byte.is_ascii_digit()
+            } else {
+                byte == *expected
+            }
+        });
+    if !shaped {
         return Err(BundleError::InvalidIssuedAt);
     }
     if value
@@ -261,6 +267,18 @@ fn validate_issued_at(value: &str) -> Result<(), BundleError> {
     }
     Ok(())
 }
+
+/// The stand-in for "any digit" in [`ISSUED_AT_SHAPE`].
+///
+/// `d` is safe to overload: no position in a date-time shape requires a
+/// literal `d`.
+const DIGIT: u8 = b'd';
+
+/// The shape every accepted timestamp shares, over its leading bytes.
+///
+/// Anything after this is zone, whose forms vary (`Z`, `+00:00`, a fractional
+/// second and then either) and are bounded by length alone.
+const ISSUED_AT_SHAPE: &[u8] = b"dddd-dd-ddTdd:dd:dd";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

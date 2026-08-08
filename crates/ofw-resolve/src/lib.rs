@@ -955,7 +955,10 @@ mod tests {
             vec!["git.worktree_path"]
         );
         assert_eq!(scoped.canonical_targets().len(), 1);
-        assert!(scoped.canonical_targets()[0].ends_with("tracked.txt"));
+        let Some(scoped_target) = scoped.canonical_targets().first() else {
+            unreachable!("a scoped log must resolve one target")
+        };
+        assert!(scoped_target.ends_with("tracked.txt"));
 
         // The same command with its operands dropped. Indistinguishable from
         // an unscoped `git log`, and the target is now the whole working tree.
@@ -971,7 +974,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["git.repository"]
         );
-        assert!(!widened.canonical_targets()[0].ends_with("tracked.txt"));
+        let Some(widened_target) = widened.canonical_targets().first() else {
+            unreachable!("an unscoped log must resolve one target")
+        };
+        assert!(!widened_target.ends_with("tracked.txt"));
         // Both are fully proven resolutions. Nothing about the widened one
         // looks degraded, which is precisely the problem.
         assert_eq!(

@@ -288,7 +288,7 @@ impl ValidatedPolicyBundle {
         rules.sort_by(|left, right| left.rule_id.cmp(&right.rule_id));
         if rules
             .windows(2)
-            .any(|pair| pair[0].rule_id == pair[1].rule_id)
+            .any(|pair| matches!(pair, [left, right] if left.rule_id == right.rule_id))
         {
             return Err(PolicyError::DuplicateRuleIdentity);
         }
@@ -356,7 +356,7 @@ impl EffectivePolicy {
         rules.sort_by(|left, right| left.identity.cmp(&right.identity));
         if rules
             .windows(2)
-            .any(|pair| pair[0].identity == pair[1].identity)
+            .any(|pair| matches!(pair, [left, right] if left.identity == right.identity))
         {
             return Err(PolicyError::DuplicateEffectiveRuleIdentity);
         }
@@ -1248,9 +1248,7 @@ mod tests {
 
         // The invariant: an indeterminate outcome names the rule that could not
         // be resolved, not merely the fact class that was unavailable.
-        let names_the_unresolved_rule = |identities: &[EffectiveRuleIdentity]| {
-            identities.len() == 1 && identities[0].rule_id == identifier("protect-path")
-        };
+        let names_the_unresolved_rule = |identities: &[EffectiveRuleIdentity]| matches!(identities, [only] if only.rule_id == identifier("protect-path"));
 
         assert_eq!(evaluation.outcome, PolicyOutcome::Indeterminate);
         assert!(names_the_unresolved_rule(&evaluation.indeterminate_rules));

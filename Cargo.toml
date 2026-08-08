@@ -30,5 +30,17 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
 expect_used = "deny"
+# A panic is not a refusal. This binary is a Codex `PreToolUse` hook and the
+# host fails OPEN: only exit 2 with a correctly shaped reason denies, and a
+# panic is exit 101. So every unchecked index on the decision path is a refusal
+# that can silently become a pass, which is the one outcome the project exists
+# to prevent.
+#
+# Added after a mutation run found `validate_issued_at` indexing six fixed
+# offsets behind a length check ten lines earlier. Nothing was wrong with the
+# code -- the guard held -- but the guard's correctness was a matter of reading
+# two distant lines together, and this makes the gate enforce the class instead
+# of a reviewer noticing the instance.
+indexing_slicing = "deny"
 panic = "deny"
 unwrap_used = "deny"

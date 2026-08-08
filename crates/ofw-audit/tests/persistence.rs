@@ -199,9 +199,12 @@ fn a_partial_final_record_is_quarantined_and_reported() {
 
     let lines = read_segment(&segment);
     assert_eq!(lines.len(), 1, "the intact record survives");
-    assert!(lines[0].contains("intact"));
+    let Some(survivor) = lines.first() else {
+        unreachable!("the intact record must survive")
+    };
+    assert!(survivor.contains("intact"));
     assert!(
-        !lines[0].contains("trunc"),
+        !survivor.contains("trunc"),
         "the damaged record must not remain in the active segment"
     );
 

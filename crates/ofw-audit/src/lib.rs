@@ -585,9 +585,12 @@ mod tests {
         );
         assert!(value.starts_with(&Digest::of(b"seed").value()[..8]));
         // Version 4 nibble and a valid variant nibble.
-        assert_eq!(groups[2].as_bytes().first(), Some(&b'4'));
+        assert_eq!(
+            groups.get(2).and_then(|group| group.as_bytes().first()),
+            Some(&b'4')
+        );
         assert!(matches!(
-            groups[3].as_bytes().first(),
+            groups.get(3).and_then(|group| group.as_bytes().first()),
             Some(b'8' | b'9' | b'a' | b'b')
         ));
         assert!(

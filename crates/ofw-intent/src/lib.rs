@@ -460,7 +460,10 @@ pub fn classify(tokens: &[String]) -> Classification {
         return Classification::Unsupported(UnsupportedReason::GlobalOptionRejected);
     }
 
-    let arguments = &tokens[2..];
+    // `tokens.get(1)` succeeded, so a tail from index 2 always exists -- empty
+    // when the subcommand was the last token. Written as a fallible read so the
+    // guarantee is local to the line rather than inferred from the one above.
+    let arguments = tokens.get(2..).unwrap_or_default();
     let Some(profile) = INTERPRETED_SUBCOMMANDS
         .iter()
         .find(|profile| profile.subcommand == subcommand.as_str())

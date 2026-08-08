@@ -956,8 +956,9 @@ mod tests {
         samples.sort_unstable();
         // Index 189 of 0..=199 is the 95th percentile by nearest-rank.
         let index = (SAMPLES * 95).div_ceil(100) - 1;
-        let p95 = samples[index];
-        let median = samples[SAMPLES / 2];
+        let (Some(&p95), Some(&median)) = (samples.get(index), samples.get(SAMPLES / 2)) else {
+            unreachable!("{SAMPLES} samples were collected")
+        };
 
         assert!(
             p95 <= BUDGET,

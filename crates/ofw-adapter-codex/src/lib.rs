@@ -1220,9 +1220,13 @@ mod tests {
 
     #[test]
     fn every_truncated_recognized_envelope_is_indeterminate() {
-        for end in 0..VALID.len() {
+        let bytes = VALID.as_bytes();
+        for end in 0..bytes.len() {
+            let Some(prefix) = bytes.get(..end) else {
+                unreachable!("a prefix shorter than the whole must exist")
+            };
             assert!(matches!(
-                assess_pre_tool_use(&VALID.as_bytes()[..end]),
+                assess_pre_tool_use(prefix),
                 EnvelopeAssessment::Indeterminate(_)
             ));
         }
@@ -1348,9 +1352,13 @@ mod tests {
             );
 
         for fixture in [VALID, apply_patch.as_str()] {
-            for end in 0..fixture.len() {
+            let bytes = fixture.as_bytes();
+            for end in 0..bytes.len() {
+                let Some(prefix) = bytes.get(..end) else {
+                    unreachable!("a prefix shorter than the whole must exist")
+                };
                 assert!(matches!(
-                    assess_supported_pre_tool_use(&fixture.as_bytes()[..end]),
+                    assess_supported_pre_tool_use(prefix),
                     AdapterAssessment::Indeterminate(_)
                 ));
             }

@@ -180,15 +180,14 @@ mod tests {
         assert!(value.ends_with('Z'));
 
         let bytes = value.as_bytes();
-        for index in [4, 7] {
-            assert_eq!(bytes[index], b'-', "got {value}");
-        }
-        assert_eq!(bytes[10], b'T');
-        for index in [13, 16] {
-            assert_eq!(bytes[index], b':', "got {value}");
+        for (index, separator) in [(4, b'-'), (7, b'-'), (10, b'T'), (13, b':'), (16, b':')] {
+            assert_eq!(bytes.get(index), Some(&separator), "got {value}");
         }
         for index in [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18] {
-            assert!(bytes[index].is_ascii_digit(), "got {value}");
+            assert!(
+                bytes.get(index).is_some_and(u8::is_ascii_digit),
+                "got {value}"
+            );
         }
 
         let year: u32 = match value[..4].parse() {
