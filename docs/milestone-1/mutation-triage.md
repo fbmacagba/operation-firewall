@@ -309,7 +309,27 @@ too.
 advancing. A timeout is not a survivor but it is not a kill either; the job
 treats it as a failure for that reason.
 
-**Status:** measured, not yet acted on. Widening `main` requires killing the
-survivors first, because the job blocks. The scoped-down step this measurement
-justifies is `ofw-contracts` and `ofw-audit`; the CLI and adapter stay out with
-a number behind the decision rather than an assumption.
+**Status: done for the two crates the measurement indicted.** All 56 survivors
+in `ofw-contracts` and `ofw-audit` are killed, and both crates joined the gate's
+scope on 2026-08-08 at zero survivors — confirmed on a branch first, so `main`
+never carried a red gate. The job now covers six of the eight crates: 380
+mutants, 321 caught, 59 unviable, none missed.
+
+Three of those 56 deserve their own note, because two were created by the fix
+and one was a test that tested nothing:
+
+- `should_rotate`'s emptiness guard stayed unguarded after the test written for
+  it. The fixture used a record-sized line against an empty segment, and a
+  record is bounded well under a segment — so the size half was false regardless
+  and the emptiness half was never exercised. Only a line larger than the
+  segment bound isolates it.
+- `LockGuard::is_stale` still returned a constant under both mutations even
+  with its rule extracted and pinned. **A rule being testable is not the same
+  as the reading of it being tested**, and extracting one without testing the
+  caller buys a false sense of coverage. `std::fs::File::set_times` makes the
+  stale branch reachable with no dependency and no waiting; it went untested
+  because nobody looked for the tool, not because none existed.
+
+`ofw-cli` and `ofw-adapter-codex` stay out with **112 unread survivors** between
+them. That is a recorded number, not a claim that they are clean, and reading it
+is the next widening.

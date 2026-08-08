@@ -210,7 +210,7 @@ bindings, which would need `unsafe` in this project's own crates.
 
 ### 4 — Test gates: met
 
-Present: **187 tests; 28 retained red-first witnesses**; negative and abuse
+Present: **204 tests; 28 retained red-first witnesses**; negative and abuse
 corpora; canary tests on the CLI streams, bundle errors and audit records;
 property-style monotonicity; deadline handling in the hook.
 
@@ -354,11 +354,12 @@ Confirmed on run
 `mutation`, all six jobs green.
 
 **What this does not cover, stated rather than left to be inferred.** The
-mutation job is scoped to the four decision crates. `ofw-cli`,
-`ofw-adapter-codex`, `ofw-audit` and `ofw-contracts` are **unmeasured, not
-clean** — the scoping is deliberate and recorded in the workflow, but a reader
-who takes "mutation testing passes" to mean "the whole workspace is mutation
-tested" would be wrong. Widening it is future work, not a defect in this claim.
+mutation job covers six of the eight crates as of 2026-08-08. `ofw-cli` and
+`ofw-adapter-codex` are **unmeasured, not clean**, and the number is known:
+112 survivors between them, unread. A reader who takes "mutation testing
+passes" to mean "the whole workspace is mutation tested" would still be
+wrong, and the remaining gap is now a measurement rather than an assumption.
+See [the triage](mutation-triage.md).
 
 Every guard added in this milestone was verified load-bearing by weakening it
 alone and confirming the matching test reds — not merely by the suite passing.
