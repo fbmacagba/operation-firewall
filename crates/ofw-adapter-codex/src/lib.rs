@@ -1431,4 +1431,205 @@ mod tests {
             Err(parse_error) if parse_error.code() == expected
         ));
     }
+
+    /// The envelope's own `cwd`, with a JSON string body substituted in.
+    ///
+    /// `cwd` is a required string the parser decodes and hands back, so it is
+    /// the shortest route from a JSON escape to an observable value.
+    fn envelope_with_cwd(json_body: &str) -> String {
+        let replaced = VALID.replace(
+            r#""cwd":"F:\\Projects\\operation-firewall""#,
+            &format!(r#""cwd":"{json_body}""#),
+        );
+        assert_ne!(replaced, VALID, "the cwd fixture must apply");
+        replaced
+    }
+
+    fn cwd_of(json_body: &str) -> String {
+        match parse_pre_tool_use(envelope_with_cwd(json_body).as_bytes()) {
+            Ok(envelope) => envelope.cwd().to_owned(),
+            Err(error) => unreachable!("{json_body} must parse: {error}"),
+        }
+    }
+
+    /// Every JSON escape decodes to the character it names.
+    ///
+    /// Five of these arms could be deleted with nothing noticing. A deleted arm
+    /// makes the parser refuse valid JSON, which is fail-closed and still a
+    /// parser that no longer reads its own format -- a host sending a perfectly
+    /// ordinary path containing a quote would be denied with "invalid JSON".
+    #[test]
+    fn every_json_escape_decodes_to_its_character() {
+        let cases = [
+            (r#"\""#, "\""),
+            (r"\\", "\\"),
+            (r"\/", "/"),
+            (r"\b", "\u{0008}"),
+            (r"\f", "\u{000c}"),
+            (r"\n", "\n"),
+            (r"\r", "\r"),
+            (r"\t", "\t"),
+        ];
+        for (escape, expected) in cases {
+            assert_eq!(cwd_of(escape), expected, "escape {escape}");
+        }
+
+        // ...and in combination, so no arm is only ever reached alone.
+        let all: String = cases.iter().map(|(escape, _)| *escape).collect();
+        let decoded: String = cases.iter().map(|(_, expected)| *expected).collect();
+        assert_eq!(cwd_of(&all), decoded);
+    }
+
+    /// A raw control character inside a JSON string is refused.
+    ///
+    /// RFC 8259 requires these to be escaped. Deleting the arm that enforces it
+    /// **widens** what this parser accepts -- and it is the first thing that
+    /// reads bytes an agent supplied, so widening it is the direction that
+    /// matters. Every byte below 0x20 is checked rather than a sample, because
+    /// the arm is a range and a range is where an off-by-one hides.
+    #[test]
+    fn a_raw_control_character_in_a_string_is_refused() {
+        for byte in 0x00_u8..=0x1f {
+            let body = format!("a{}b", char::from(byte));
+            let envelope = envelope_with_cwd(&body);
+            assert!(
+                parse_pre_tool_use(envelope.as_bytes()).is_err(),
+                "a raw 0x{byte:02x} inside a JSON string must be refused"
+            );
+        }
+        // The boundary above it is ordinary text and must still parse.
+        assert_eq!(cwd_of("a b"), "a b");
+    }
+
+    /// Unicode escapes decode to the scalar they name, surrogate pairs included.
+    ///
+    /// Seven mutants lived in this arithmetic -- the shift, the combine, and
+    /// both surrogate subtractions -- because nothing ever read a decoded
+    /// astral character back. A wrong decode here silently substitutes one
+    /// character for another in a value the rest of the system treats as
+    /// trusted input.
+    ///
+    /// One mutation in this expression is **not** killable and is not a
+    /// missing test: `|` swapped for `^`. The shifted high surrogate and the
+    /// low surrogate are bit-disjoint by construction, so the two operators
+    /// agree on every input -- checked exhaustively across all 1 048 576
+    /// surrogate pairs. See docs/milestone-1/mutation-triage.md.
+    #[test]
+    fn unicode_escapes_decode_to_the_scalar_they_name() {
+        let cases = [
+            (r"\u0041", "A"),
+            (r"\u00e9", "\u{e9}"),
+            (r"\u0000", "\u{0}"),
+            (r"\uffff", "\u{ffff}"),
+            // Surrogate pairs: the astral plane, where the arithmetic lives.
+            (r"\ud83d\udd12", "\u{1f512}"),
+            (r"\ud800\udc00", "\u{10000}"),
+            (r"\udbff\udfff", "\u{10ffff}"),
+        ];
+        for (escape, expected) in cases {
+            assert_eq!(cwd_of(escape), expected, "escape {escape}");
+        }
+
+        // A lone or inverted surrogate is refused rather than substituted.
+        for broken in [
+            r"\ud83d",
+            r"\udd12",
+            r"\ud83d\u0041",
+            r"\udd12\ud83d",
+            r"\ud83dx",
+        ] {
+            let envelope = envelope_with_cwd(broken);
+            assert!(
+                parse_pre_tool_use(envelope.as_bytes()).is_err(),
+                "a malformed surrogate sequence must be refused: {broken}"
+            );
+        }
+    }
+
+    /// The generic JSON value parser reads every scalar shape it claims to.
+    ///
+    /// `tool_input` is parsed as arbitrary JSON before its known fields are
+    /// read, so the value parser sees whatever the host sends. Deleting the
+    /// `true` or `false` arm makes an envelope carrying an ordinary boolean
+    /// unparseable; mutating the number arithmetic misreads a number or
+    /// refuses one that is well formed.
+    #[test]
+    fn the_value_parser_reads_every_scalar_shape_it_claims_to() {
+        let bodies = [
+            r#"{"command":"git status","flag":true}"#,
+            r#"{"command":"git status","flag":false}"#,
+            r#"{"command":"git status","flag":null}"#,
+            r#"{"command":"git status","n":0}"#,
+            r#"{"command":"git status","n":123}"#,
+            r#"{"command":"git status","n":-7}"#,
+            r#"{"command":"git status","n":1.5}"#,
+            r#"{"command":"git status","n":1e3}"#,
+            r#"{"command":"git status","n":1.5e-3}"#,
+            r#"{"command":"git status","nested":{"a":[1,2,3]}}"#,
+            r#"{"command":"git status","empty":[]}"#,
+        ];
+        for body in bodies {
+            let envelope = VALID.replace(
+                r#""tool_input":{"command":"git status","unicode":"\uD83D\uDD12"}"#,
+                &format!(r#""tool_input":{body}"#),
+            );
+            assert_ne!(envelope, VALID, "the tool_input fixture must apply: {body}");
+            assert!(
+                parse_pre_tool_use(envelope.as_bytes()).is_ok(),
+                "a well-formed envelope must parse: {body}"
+            );
+        }
+
+        // Malformed numbers are refused rather than repaired. A leading zero
+        // and a bare decimal point are both invalid JSON.
+        for body in [
+            r#"{"command":"git status","n":01}"#,
+            r#"{"command":"git status","n":1.}"#,
+            r#"{"command":"git status","n":1e}"#,
+            r#"{"command":"git status","n":-}"#,
+        ] {
+            let envelope = VALID.replace(
+                r#""tool_input":{"command":"git status","unicode":"\uD83D\uDD12"}"#,
+                &format!(r#""tool_input":{body}"#),
+            );
+            assert!(
+                parse_pre_tool_use(envelope.as_bytes()).is_err(),
+                "a malformed number must be refused: {body}"
+            );
+        }
+    }
+
+    /// A nullable field accepts both a string and `null`, and nothing else.
+    ///
+    /// The type check is written as "not a quote is an error". Inverting it
+    /// makes a present string the error and a non-string the accepted case,
+    /// which is the shape that lets a wrongly-typed field through.
+    #[test]
+    fn a_nullable_field_accepts_a_string_or_null_and_nothing_else() {
+        let with = |value: &str| {
+            VALID.replace(
+                r#""transcript_path":null"#,
+                &format!(r#""transcript_path":{value}"#),
+            )
+        };
+        // Asserted once on the target rather than per case: substituting the
+        // fixture's own value back is a no-op, so "the string changed" is the
+        // wrong check here even though it is the right one elsewhere.
+        assert!(
+            VALID.contains(r#""transcript_path":null"#),
+            "the transcript_path fixture must be present"
+        );
+        for accepted in [r#""/tmp/transcript.jsonl""#, "null"] {
+            assert!(
+                parse_pre_tool_use(with(accepted).as_bytes()).is_ok(),
+                "a nullable field must accept {accepted}"
+            );
+        }
+        for refused in ["123", "true", "[]", "{}"] {
+            assert!(
+                parse_pre_tool_use(with(refused).as_bytes()).is_err(),
+                "a nullable field must refuse {refused}"
+            );
+        }
+    }
 }
