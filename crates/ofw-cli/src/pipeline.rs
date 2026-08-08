@@ -473,7 +473,12 @@ const fn resolution_reason(error: ResolutionError) -> Reason {
         | ResolutionError::NonUtf8Path
         | ResolutionError::PathTooLong
         | ResolutionError::TooManyPathSegments
-        | ResolutionError::TargetKindUnrepresentable => TARGET_RESOLUTION_INDETERMINATE,
+        | ResolutionError::TargetKindUnrepresentable
+        // Also a disagreement rather than a missing feature: the document says
+        // create and the filesystem says something is already there, so the
+        // effect the decision would be made under is not the effect that would
+        // occur.
+        | ResolutionError::CreationTargetExists => TARGET_RESOLUTION_INDETERMINATE,
     }
 }
 

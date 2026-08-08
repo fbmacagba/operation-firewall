@@ -342,6 +342,15 @@ pub enum ResolutionError {
     /// syntax. A build-time defect, but it must not degrade into a resolution
     /// that simply omits the kind it could not represent.
     TargetKindUnrepresentable,
+    /// A creation names a path that is already there.
+    ///
+    /// The document says create; the filesystem says something is in the way.
+    /// Applying it would overwrite, which is an update — so the effect the
+    /// decision would be made under is not the effect that would occur, and
+    /// `Create` is the one effect this crate calls cleanly reversible. Refused
+    /// rather than resolved under either reading, exactly as a kind arriving
+    /// with operands its grammar forbids is refused.
+    CreationTargetExists,
 }
 
 impl core::fmt::Display for ResolutionError {
@@ -361,6 +370,7 @@ impl core::fmt::Display for ResolutionError {
             Self::PathTooLong => "canonical path exceeds the configured byte limit",
             Self::TooManyPathSegments => "canonical path exceeds the configured segment limit",
             Self::TargetKindUnrepresentable => "target kind is not a representable contract name",
+            Self::CreationTargetExists => "a creation target already exists",
         };
         formatter.write_str(message)
     }
@@ -377,8 +387,20 @@ enum TargetScope {
     /// working directory.
     Repository,
     /// A specific list of paths, each resolved against the trusted working
-    /// directory.
+    /// directory. Every one must already exist.
     Paths,
+    /// A specific list of paths the operation would *write*, where a target
+    /// need not exist yet.
+    ///
+    /// Separate from [`Paths`](Self::Paths) because the two answer "this did
+    /// not canonicalize" differently, and conflating them would be a bypass in
+    /// either direction. A read of a path that is not there resolves nothing
+    /// and must fail. A write to a path that is not there is the ordinary case
+    /// — refusing it would make every file creation indeterminate — so the
+    /// design's rule applies instead: canonicalize the nearest existing
+    /// ancestor and append the remaining components without claiming they
+    /// exist.
+    WritePaths,
 }
 
 /// The contract name for a whole repository working tree as a target.
@@ -606,15 +628,27 @@ pub fn resolve(
     )?;
 
     // Reversibility is derived from the effect, never accepted from anywhere.
-    // Only `Read` is derivable while the interpreted subset is read-only;
-    // every other effect has to be argued for in the slice that introduces it.
+    // Each arm is argued for in the slice that introduces it; the rest stay
+    // unsupported rather than being given a plausible-looking answer.
     let reversibility = match candidate.effect() {
         OperationEffect::Read => Reversibility::Reversible,
-        OperationEffect::Create
-        | OperationEffect::Update
-        | OperationEffect::Delete
-        | OperationEffect::Move
-        | OperationEffect::Execute
+        // A creation loses nothing: undoing it is deleting what was created,
+        // and nothing prior was overwritten. That last clause is a real
+        // precondition rather than a turn of phrase, which is why the write
+        // scope below refuses a creation whose target already exists — an
+        // "add" over an existing file is an overwrite wearing a create's name,
+        // and this arm would call the overwrite reversible.
+        OperationEffect::Create => Reversibility::Reversible,
+        // Overwriting, removing and renaming all destroy something. Whether it
+        // comes back depends on whether it was committed, and this crate
+        // deliberately does not read `.git` or invoke git, so it cannot know.
+        // `ConditionallyRecoverable` states the category without asserting the
+        // condition holds; `Reversible` would assert it, and `Unknown` would
+        // discard what we do know. None of the three reaches the allow row.
+        OperationEffect::Update | OperationEffect::Delete | OperationEffect::Move => {
+            Reversibility::ConditionallyRecoverable
+        }
+        OperationEffect::Execute
         | OperationEffect::PermissionChange
         | OperationEffect::Publish
         | OperationEffect::UnknownMutation => return Err(ResolutionError::EffectUnsupported),
@@ -658,6 +692,29 @@ pub fn resolve(
             // needs a metadata call whose answer can change between deciding
             // and executing. The narrower fact lives in `canonical_targets`
             // and in the target kind, where it is exact.
+            (resolved, vec![kind], BlastRadius::Bounded)
+        }
+        TargetScope::WritePaths => {
+            let working = canonicalize(&configuration.working_directory)
+                .ok_or(ResolutionError::WorkingDirectoryUnresolvable)?;
+            let kind = NamespacedName::new(PATH_TARGET_KIND)
+                .map_err(|_| ResolutionError::TargetKindUnrepresentable)?;
+
+            // A document whose most consequential operation is a create
+            // contains *only* creates: create is the least consequential of the
+            // four, so it can only be the maximum when nothing outranks it.
+            // That is what makes this check sound for the whole target list
+            // rather than needing per-path expectations.
+            let creation_only = matches!(candidate.effect(), OperationEffect::Create);
+
+            let mut resolved = Vec::with_capacity(candidate.path_candidates().len());
+            for operand in candidate.path_candidates() {
+                if creation_only && canonicalize(&working.join(operand)).is_some() {
+                    return Err(ResolutionError::CreationTargetExists);
+                }
+                resolved.push(resolve_write_path(&working, operand)?);
+            }
+
             (resolved, vec![kind], BlastRadius::Bounded)
         }
     };
@@ -734,7 +791,67 @@ fn target_scope(
         ("git.status" | "git.rev_parse", _) => Err(ResolutionError::OperandsUnexpectedForKind),
         ("git.log" | "git.diff", 0) => Ok(TargetScope::Repository),
         ("git.log" | "git.diff", _) => Ok(TargetScope::Paths),
+        // A patch that names no path is the same contradiction as a `git
+        // status` that names one: the grammar cannot produce it, so the two
+        // layers disagree, and resolving under either reading describes an
+        // operation that is not happening.
+        ("patch.add_file" | "patch.update_file" | "patch.delete_file" | "patch.move_file", 0) => {
+            Err(ResolutionError::OperandsUnexpectedForKind)
+        }
+        ("patch.add_file" | "patch.update_file" | "patch.delete_file" | "patch.move_file", _) => {
+            Ok(TargetScope::WritePaths)
+        }
         _ => Err(ResolutionError::OperationKindUnsupported),
+    }
+}
+
+/// Resolves a path the operation would write, which need not exist yet.
+///
+/// The design's rule: canonicalize the nearest existing ancestor and append the
+/// remaining components without claiming they exist. Containment is then
+/// decided on the result exactly as it is for a read.
+///
+/// # Why the appended part is safe to append
+///
+/// Nothing canonicalizes it, so a `..` inside it would survive into the
+/// containment comparison as text and walk back out of the boundary. That is
+/// why the patch grammar refuses `.` and `..` components lexically — the one
+/// place in this project where traversal is a grammar concern rather than a
+/// resolver one. This function depends on that and says so, rather than
+/// re-deriving it from a path it has already lost the spelling of.
+///
+/// The ancestor walk stops at the first component that exists, so a symlinked
+/// ancestor is still canonicalized and still measured. Only components that do
+/// not exist are taken on trust, and a component that does not exist cannot be
+/// a link to anywhere.
+fn resolve_write_path(working: &Path, operand: &str) -> Result<PathBuf, ResolutionError> {
+    let joined = working.join(operand);
+    if let Some(canonical) = canonicalize(&joined) {
+        return Ok(canonical);
+    }
+
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    let mut ancestor = joined.as_path();
+    loop {
+        let (Some(parent), Some(name)) = (ancestor.parent(), ancestor.file_name()) else {
+            // Ran out of ancestors without finding one that exists. The whole
+            // chain is unresolvable, which for a write means the operand does
+            // not name a place inside anything this process can see.
+            return Err(ResolutionError::PathOperandUnresolvable);
+        };
+        missing.push(name.to_owned());
+        if let Some(canonical) = canonicalize(parent) {
+            let mut resolved = canonical;
+            // Pushed back in the order they were stripped.
+            for component in missing.iter().rev() {
+                resolved.push(component);
+            }
+            return Ok(resolved);
+        }
+        if missing.len() > MAX_PATH_SEGMENTS {
+            return Err(ResolutionError::TooManyPathSegments);
+        }
+        ancestor = parent;
     }
 }
 
@@ -793,6 +910,20 @@ mod tests {
 
     fn git_status() -> IntentCandidate {
         supported("git status")
+    }
+
+    /// Builds a patch candidate from directive lines, wrapping the terminators.
+    fn patch(lines: &[&str]) -> IntentCandidate {
+        let mut document = String::from("*** Begin Patch\n");
+        for line in lines {
+            document.push_str(line);
+            document.push('\n');
+        }
+        document.push_str("*** End Patch\n");
+        match ofw_intent::interpret_patch(&document) {
+            ofw_intent::PatchClassification::Supported(candidate) => *candidate,
+            other => unreachable!("{lines:?} must classify, got {other:?}"),
+        }
     }
 
     fn supported(command: &str) -> IntentCandidate {
@@ -1256,6 +1387,7 @@ mod tests {
             ResolutionError::PathTooLong,
             ResolutionError::TooManyPathSegments,
             ResolutionError::TargetKindUnrepresentable,
+            ResolutionError::CreationTargetExists,
         ];
 
         let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -1273,7 +1405,8 @@ mod tests {
                 | ResolutionError::NonUtf8Path
                 | ResolutionError::PathTooLong
                 | ResolutionError::TooManyPathSegments
-                | ResolutionError::TargetKindUnrepresentable => error.to_string(),
+                | ResolutionError::TargetKindUnrepresentable
+                | ResolutionError::CreationTargetExists => error.to_string(),
             };
             assert!(!rendered.is_empty(), "{error:?} renders nothing");
             assert!(seen.insert(rendered), "{error:?} shares another message");
@@ -1630,6 +1763,269 @@ mod tests {
                 "a file {excess} bytes over the limit must be refused"
             );
         }
+    }
+
+    /// A creation resolves to a definite place that is not there yet.
+    ///
+    /// The design's rule for a write target: canonicalize the nearest existing
+    /// ancestor and append the remaining components without claiming they
+    /// exist. Without it every file creation would be `indeterminate`, because
+    /// a path that does not exist does not canonicalize -- which is the correct
+    /// answer for a read and the wrong one for a write.
+    #[test]
+    fn a_creation_resolves_through_its_nearest_existing_ancestor() {
+        let boundary = directory("create");
+        let working = directory("create/worktree");
+        let configuration = configuration(working.clone(), boundary);
+
+        let resolved = match resolve(
+            &patch(&["*** Add File: a/b/c/new.txt", "+x"]),
+            &configuration,
+        ) {
+            Ok(resolved) => resolved,
+            Err(error) => unreachable!("a creation must resolve: {error}"),
+        };
+
+        assert_eq!(resolved.context().containment, Containment::RepositoryLocal);
+        assert_eq!(
+            resolved.context().target_completeness,
+            TargetCompleteness::Complete
+        );
+        // Cleanly reversible, and only because nothing was overwritten -- see
+        // the creation-target check below, which is what makes that true.
+        assert_eq!(resolved.context().reversibility, Reversibility::Reversible);
+        assert_eq!(resolved.canonical_targets().len(), 1);
+        let Some(target) = resolved.canonical_targets().first() else {
+            unreachable!("a creation resolves one target")
+        };
+        assert!(target.ends_with("new.txt"), "got {target}");
+        // The missing components are appended, not invented somewhere else:
+        // the result still sits under the canonicalized working directory.
+        let canonical_working = match super::canonicalize(&working) {
+            Some(path) => path,
+            None => unreachable!("the test working directory must canonicalize"),
+        };
+        assert!(
+            Path::new(target).starts_with(&canonical_working),
+            "got {target}"
+        );
+        // ...and the path it names is genuinely absent, which is the whole
+        // point: resolution must not have created or required anything.
+        assert!(!Path::new(target).exists());
+    }
+
+    /// A creation whose target is already there is refused, not resolved.
+    ///
+    /// The document says create; the filesystem says something is in the way.
+    /// Applying it would overwrite, which is an update -- and `Create` is the
+    /// one effect this crate calls cleanly reversible, so accepting the
+    /// mismatch would call an overwrite reversible.
+    ///
+    /// The check is sound across the whole target list because of how the
+    /// grammar picks a document's effect: create is the least consequential of
+    /// the four, so it can only be the maximum when every operation is one.
+    #[test]
+    fn a_creation_over_an_existing_path_is_refused() {
+        let boundary = directory("create-collision");
+        let working = directory("create-collision/worktree");
+        match std::fs::write(working.join("taken.txt"), b"already here") {
+            Ok(()) => {}
+            Err(error) => unreachable!("test file must be writable: {error}"),
+        }
+        let configuration = configuration(working, boundary);
+
+        assert_eq!(
+            resolve(&patch(&["*** Add File: taken.txt", "+x"]), &configuration),
+            Err(ResolutionError::CreationTargetExists)
+        );
+        // One collision fails the whole document, like an unresolvable operand.
+        assert_eq!(
+            resolve(
+                &patch(&[
+                    "*** Add File: fresh.txt",
+                    "+x",
+                    "*** Add File: taken.txt",
+                    "+y"
+                ]),
+                &configuration
+            ),
+            Err(ResolutionError::CreationTargetExists)
+        );
+        // An *update* to the same existing path is fine: overwriting is what
+        // an update is, and it is not called reversible.
+        let updated = match resolve(
+            &patch(&["*** Update File: taken.txt", "@@", "+y"]),
+            &configuration,
+        ) {
+            Ok(resolved) => resolved,
+            Err(error) => unreachable!("an update must resolve: {error}"),
+        };
+        assert_eq!(
+            updated.context().reversibility,
+            Reversibility::ConditionallyRecoverable
+        );
+    }
+
+    /// Every patch effect gets the reversibility it can actually be argued for.
+    ///
+    /// Overwriting, removing and renaming all destroy something, and whether it
+    /// comes back depends on whether it was committed. This crate deliberately
+    /// does not read `.git` or invoke git, so it cannot know -- and
+    /// `ConditionallyRecoverable` states the category without asserting the
+    /// condition holds. None of these reaches the baseline's allow row, which
+    /// requires `Reversible`.
+    #[test]
+    fn each_patch_effect_gets_the_reversibility_it_can_be_argued_for() {
+        let boundary = directory("reversibility");
+        let working = directory("reversibility/worktree");
+        for name in ["present.txt", "other.txt"] {
+            match std::fs::write(working.join(name), b"contents") {
+                Ok(()) => {}
+                Err(error) => unreachable!("test file must be writable: {error}"),
+            }
+        }
+        let configuration = configuration(working, boundary);
+
+        let create: &[&str] = &["*** Add File: fresh.txt", "+x"];
+        let update: &[&str] = &["*** Update File: present.txt", "@@", "+x"];
+        let delete: &[&str] = &["*** Delete File: present.txt"];
+        let moved: &[&str] = &["*** Update File: present.txt", "*** Move to: renamed.txt"];
+
+        let cases: [(&[&str], Reversibility); 4] = [
+            (create, Reversibility::Reversible),
+            (update, Reversibility::ConditionallyRecoverable),
+            (delete, Reversibility::ConditionallyRecoverable),
+            (moved, Reversibility::ConditionallyRecoverable),
+        ];
+        for (lines, expected) in cases {
+            let resolved = match resolve(&patch(lines), &configuration) {
+                Ok(resolved) => resolved,
+                Err(error) => unreachable!("{lines:?} must resolve: {error}"),
+            };
+            assert_eq!(resolved.context().reversibility, expected, "{lines:?}");
+        }
+    }
+
+    /// A move names both ends, and both are resolved.
+    #[test]
+    fn a_move_resolves_its_source_and_its_destination() {
+        let boundary = directory("move");
+        let working = directory("move/worktree");
+        match std::fs::write(working.join("before.txt"), b"contents") {
+            Ok(()) => {}
+            Err(error) => unreachable!("test file must be writable: {error}"),
+        }
+        let configuration = configuration(working, boundary);
+
+        let resolved = match resolve(
+            &patch(&["*** Update File: before.txt", "*** Move to: after.txt"]),
+            &configuration,
+        ) {
+            Ok(resolved) => resolved,
+            Err(error) => unreachable!("a move must resolve: {error}"),
+        };
+        // Two targets: one that exists and one that does not. A resolver that
+        // refused the second, or silently dropped it, would describe a move as
+        // touching half of what it touches.
+        assert_eq!(resolved.canonical_targets().len(), 2);
+        assert_eq!(resolved.context().containment, Containment::RepositoryLocal);
+    }
+
+    /// A write whose working directory is not there is unresolvable, not
+    /// resolvable-by-string.
+    ///
+    /// Retained red-first witness for the write path specifically. The rule for
+    /// a creation target -- append components nobody canonicalized -- is one
+    /// step from appending *everything* and never touching the filesystem at
+    /// all, and the result of that shortcut looks identical: an absolute path
+    /// under the configured working directory, reported as fully resolved.
+    /// Every containment guarantee in this crate rests on the ancestor having
+    /// been canonicalized.
+    #[test]
+    fn red_first_witness_detects_a_write_resolved_without_canonicalizing() {
+        let boundary = directory("write-witness");
+        let mut absent = boundary.clone();
+        absent.push("no-such-worktree");
+        let configuration = configuration(absent.clone(), boundary);
+
+        assert_eq!(
+            resolve(&patch(&["*** Add File: new.txt", "+x"]), &configuration),
+            Err(ResolutionError::WorkingDirectoryUnresolvable)
+        );
+
+        // The retained shortcut reports a resolved, plausible-looking target
+        // under a directory that is not there.
+        let vulnerable = vulnerable_lexical_write_target(&absent, "new.txt");
+        assert!(vulnerable.ends_with("new.txt"));
+        assert!(vulnerable.is_absolute());
+        assert!(!vulnerable.exists());
+    }
+
+    /// Retained red-first witness: a write target built by joining strings,
+    /// with nothing canonicalized at any point.
+    fn vulnerable_lexical_write_target(working: &Path, operand: &str) -> PathBuf {
+        working.join(operand)
+    }
+
+    /// A creation through a symlinked ancestor escapes, and is seen to escape.
+    ///
+    /// This is the only case that can tell "canonicalize the nearest existing
+    /// ancestor" apart from "join the strings". For a path with no links and no
+    /// `.`/`..` components -- which the grammar guarantees -- the lexical join
+    /// and the canonical form are the same bytes, so every other test here
+    /// passes just as well against a resolver that never canonicalizes at all.
+    ///
+    /// The grammar refuses absolute paths and traversal, so a link is the whole
+    /// of what is left: `escape/new.txt` where `escape` is a symlink out of the
+    /// worktree is a relative, traversal-free path that lands anywhere.
+    ///
+    /// **Unix only, and that is a real gap, not a formality.** Creating a
+    /// symlink on Windows needs developer mode or elevation, and a test that
+    /// quietly skipped would pass while proving nothing -- so it does not exist
+    /// on Windows rather than existing and lying. Two of the three CI platforms
+    /// run it. Windows junctions would cover the same ground and need the
+    /// Win32 API, which `forbid(unsafe_code)` puts out of reach here.
+    #[cfg(unix)]
+    #[test]
+    fn a_creation_through_a_symlinked_ancestor_is_cross_boundary() {
+        let boundary = directory("symlink-escape");
+        let working = directory("symlink-escape/worktree");
+        let outside = directory("symlink-escape-outside");
+
+        let link = working.join("escape");
+        // Removed first so a rerun in the same process id is not defeated by a
+        // link left behind, which would make this pass without testing.
+        let _ = std::fs::remove_file(&link);
+        match std::os::unix::fs::symlink(&outside, &link) {
+            Ok(()) => {}
+            Err(error) => unreachable!("the test symlink must be creatable: {error}"),
+        }
+        let configuration = configuration(working, boundary);
+
+        let resolved = match resolve(
+            &patch(&["*** Add File: escape/planted.txt", "+x"]),
+            &configuration,
+        ) {
+            Ok(resolved) => resolved,
+            Err(error) => unreachable!("a creation through a link must resolve: {error}"),
+        };
+
+        // The ancestor canonicalized to somewhere else, so the target is
+        // outside the boundary and the operation is cross-boundary -- which the
+        // baseline denies outright.
+        assert_eq!(resolved.context().containment, Containment::CrossBoundary);
+        let Some(target) = resolved.canonical_targets().first() else {
+            unreachable!("a creation resolves one target")
+        };
+        assert!(!target.contains("escape"), "the link survived: {target}");
+
+        // The retained shortcut keeps the link in the path, so the result still
+        // reads as sitting under the worktree.
+        let vulnerable = vulnerable_lexical_write_target(
+            configuration.working_directory(),
+            "escape/planted.txt",
+        );
+        assert!(vulnerable.starts_with(configuration.working_directory()));
     }
 
     /// The fingerprint records how many targets it covers.
