@@ -101,8 +101,56 @@ back would let anyone who can break the file downgrade the deployment to the
 loader with no checks. `doctor` reports which loader supplied the configuration
 and exactly what was checked.
 
-Not implemented: retention, revision operands (so `git show`, and `git log`
-against a revision, stay out of the subset), the apply-patch grammar, the
+**The apply-patch subset landed on 2026-08-08**, and with it the first
+interpreted operations that are not reads. `GRAMMAR_REVISION` moved to `1.2.0`,
+which is the largest widening so far: a `1.1.0` proof is always about a read and
+a `1.2.0` proof may be about a create, update, delete or move.
+
+Three decisions in it could each have gone the other way, and none is in the
+design at this resolution:
+
+- **A patch carries a reachable execution surface.** Applying one runs nothing —
+  the host writes bytes and stops — so the tempting classification is "no
+  execution surface", and that would have made this the first operation in the
+  system able to reach `Allow`. It was refused. The surface is in what the bytes
+  *become*: `.git/hooks/pre-commit` runs on the next commit, `.vscode/tasks.json`
+  with `runOn: folderOpen` runs with no invocation at all, and a `foo.py` at a
+  repository root shadows an installed `foo` for every `python -m foo` launched
+  from there. Enumerating which written paths are inert is open-ended in exactly
+  the way the flag allowlist exists to avoid, so no path is proven inert.
+  `ExecutionSurfaceRisk` gained a second variant rather than reusing the git one,
+  which would have been a false label for a true outcome. **The firewall still
+  allows nothing**, and the first allow should be a deliberate act rather than a
+  consequence of a match arm.
+- **Traversal is refused by the grammar here**, inverting this project's own rule
+  that escape is decided on canonical paths. The inversion is narrow and
+  necessary: a creation target has no canonical form, so the resolver appends its
+  components as text and nothing downstream can resolve a `..` away.
+- **A mixed document takes its most consequential effect.** One tool call gets
+  one decision and it authorises the whole document, not its gentlest part.
+  Severities are asserted distinct, or the effect would depend on the order the
+  document was written.
+
+`Create` is the only patch effect called cleanly reversible, and only because
+nothing prior is lost — which is a precondition, not a phrase. A creation whose
+target already exists is therefore refused outright rather than resolved: the
+document says create, the filesystem says something is in the way, and applying
+it would overwrite. Update, delete and move are `ConditionallyRecoverable`,
+because whether the old content returns depends on whether it was committed and
+this crate deliberately does not read `.git`.
+
+Verified against the built binary as well as in tests. What that run *also*
+established is a limit worth stating: `AUDIT_HEALTH` is a compile-time
+`Unhealthy` because the pipeline constructs no sink, so **every mutation this
+build interprets is refused on that line whatever its merits**, and the
+apply-patch outcome cannot yet be exercised end-to-end through the binary. The
+constant's comment previously justified itself with "persistence is not
+implemented", which stopped being true on 2026-08-07; it now says what is
+actually missing, which is wiring that needs an audit directory
+`TrustedConfiguration` does not carry and which must not be defaulted.
+
+Not implemented: retention, audit-sink wiring in the pipeline, revision operands
+(so `git show`, and `git log` against a revision, stay out of the subset), the
 PowerShell subset, and ownership/permission verification of the audit directory
 (per-platform, and the Windows path needs `unsafe`). `ofw doctor` reports each
 of these rather than implying coverage.
@@ -133,7 +181,7 @@ bindings, which would need `unsafe` in this project's own crates.
 
 ### 4 — Test gates: met
 
-Present: **164 tests; 26 retained red-first witnesses**; negative and abuse
+Present: **186 tests; 28 retained red-first witnesses**; negative and abuse
 corpora; canary tests on the CLI streams, bundle errors and audit records;
 property-style monotonicity; deadline handling in the hook.
 
@@ -177,8 +225,10 @@ cannot see is not a pin; it is a second copy that can disagree silently, and it
 disagreed for exactly as long as it took nightly to run.
 
 Fuzzing is present as of 2026-08-07: `fuzz/` holds libFuzzer targets for all
-three untrusted parsers (Codex envelope, policy bundle, shell tokenizer), run by
-a nightly-only CI job. Nightly is scoped to that job alone — `fuzz/` is excluded
+four untrusted parsers (Codex envelope, policy bundle, shell tokenizer,
+apply-patch document), run by a nightly-only CI job whose target list is read
+from  rather than written out -- it was written out, and the
+apply-patch target existed for one commit without ever being fuzzed. Nightly is scoped to that job alone — `fuzz/` is excluded
 from the workspace so the 1.97.1 pin, which is a reproducibility property of the
 shipped artifact, is not weakened to enable it. Seeds are committed to
 `tests/fuzz-corpus/` and replayed by the **stable** suite, so a crash found once
