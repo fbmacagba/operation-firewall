@@ -12,9 +12,10 @@
 //!    policy restriction.
 //!
 //! An operation that clears all four has a [`SupportedOperationProof`]. That is
-//! not the same as being allowed: the only operations interpreted today are git
-//! reads, and no git invocation can be proven non-executing from its argv, so a
-//! proven git read settles at `ask`. `ask` has no Codex wire representation and
+//! not the same as being allowed. Nothing reaches `allow` today, and for two
+//! separate reasons: no git invocation can be proven non-executing from its
+//! argv, and an apply-patch document writes paths that something else may later
+//! execute. Both settle at `ask`, which has no Codex wire representation and
 //! denies until Milestone 2 binds an approval.
 
 use std::collections::BTreeSet;
@@ -104,38 +105,45 @@ const OPERATION_NOT_PROVABLE: Reason = Reason {
 };
 /// A mutation that cannot be recorded is not performed.
 ///
-/// Unreachable while the interpreted subset is read-only -- no envelope can
-/// carry a mutation this far. The rule is exercised at `ofw_audit::gate`,
-/// which is the function that decides it.
+/// Reachable as of the apply-patch subset, which carries the first interpreted
+/// effects that are not reads. It was unreachable before that -- no envelope
+/// could carry a mutation this far -- which is why the health this rule consults
+/// could sit wrong for a day without any test noticing.
+///
+/// Only a *healthy* trail lets a mutation through. Degraded is refused too: it
+/// means a record may not have landed, and "probably recorded" is not a basis
+/// for changing state.
 const AUDIT_UNAVAILABLE_FOR_MUTATION: Reason = Reason {
     code: "AUDIT_UNAVAILABLE_FOR_MUTATION",
     message: "operation changes state and no audit trail is available to \
               record it",
 };
 
-/// The audit sink's health.
+/// Every operation kind this pipeline can prove.
 ///
-/// `Unhealthy` because this pipeline constructs no sink — **not** because
-/// persistence is unimplemented. It is implemented: `ofw-audit` appends under
-/// an exclusive lock, rotates segments by atomic rename, and quarantines a
-/// damaged trailing record on recovery. What is missing is the wiring, and the
-/// wiring needs a decision this pipeline cannot make for itself, because
-/// `TrustedConfiguration` carries no audit directory and choosing one by
-/// default would put an audit trail somewhere the operator did not name.
+/// The single list. It used to exist three times — twice as `match` arms here
+/// and once written out in `doctor` — and the `doctor` copy was six kinds and
+/// two component descriptions behind reality, still calling the subset
+/// read-only after writes shipped. `doctor` is what an operator reads to learn
+/// what the firewall covers, so a stale copy there is worse than a stale one in
+/// a test.
 ///
-/// The comment here previously said persistence did not exist. That stopped
-/// being true on 2026-08-07 and the constant kept its old justification, which
-/// is how a stale reason outlives the condition it described.
-///
-/// The consequence is worth stating plainly, because it is large and it is not
-/// a bug: **every mutation this build interprets is refused on this line**,
-/// whatever its merits. `ofw doctor` reports `audit: unhealthy` rather than
-/// leaving that to be discovered the first time a mutation mattered. It also
-/// means the apply-patch decision path cannot be exercised end-to-end through
-/// the binary today — the gate intercepts before the outcome is reached — so
-/// its behaviour is established by the crate-level tests instead, and honestly
-/// labelled as such.
-const AUDIT_HEALTH: AuditHealth = AuditHealth::Unhealthy;
+/// The `match` arms below are not derived from this and must not be: their job
+/// is to narrow a borrowed, payload-derived string to a compiled-in literal, so
+/// nothing an agent supplied can reach stdout, stderr or an audit record.
+/// `every_interpreted_kind_reaches_a_proof` is what keeps the two in step, by
+/// driving one real operation per kind through the pipeline and asserting the
+/// set it proves is exactly this list.
+pub const PROVABLE_OPERATION_KINDS: [&str; 8] = [
+    "git.status",
+    "git.rev_parse",
+    "git.log",
+    "git.diff",
+    "patch.add_file",
+    "patch.update_file",
+    "patch.delete_file",
+    "patch.move_file",
+];
 
 /// Proven, and the built-in baseline asks. Milestone 2 resolves an ask inside
 /// the hook against a bound approval; until then it denies on the wire.
@@ -303,6 +311,16 @@ pub struct AssessmentContext<'a> {
     /// cannot be proven.
     pub configuration: Option<&'a TrustedConfiguration>,
     pub policy: &'a PolicyActivation,
+    /// The health of the sink that will actually record this decision.
+    ///
+    /// Supplied by the caller rather than computed here, because the caller is
+    /// what opens the sink. This field replaced a compile-time `Unhealthy`
+    /// constant, and the difference was not cosmetic: the gate below refuses a
+    /// mutation when there is no audit trail, and with the constant in place it
+    /// refused *every* mutation even when `ofw doctor` reported
+    /// `audit_health: healthy` and records were being written to disk. Two
+    /// copies of one fact, and the gate read the one that could not be true.
+    pub audit_health: AuditHealth,
 }
 
 /// Assesses one Codex `PreToolUse` envelope.
@@ -383,7 +401,7 @@ pub fn assess(input: &[u8], context: &AssessmentContext<'_>) -> Assessment {
             // is no audit trail, and lets a read through with its health
             // reported honestly.
             let (outcome, reason, audit_health) =
-                match ofw_audit::gate(proof.evidence().effect, AUDIT_HEALTH) {
+                match ofw_audit::gate(proof.evidence().effect, context.audit_health) {
                     AuditGate::Proceed => (
                         decided,
                         decided_reason(decided, evaluation.outcome),
@@ -674,8 +692,9 @@ mod tests {
     use ofw_resolve::TrustedConfiguration;
 
     use super::{
-        APPROVAL_REQUIRED, Assessment, AssessmentContext, BASELINE_DENIED, COMMAND_NOT_LITERAL,
-        INTERPRETATION_UNSUPPORTED, POLICY_BUNDLE_INVALID, PolicyActivation, TOOL_UNSUPPORTED,
+        APPROVAL_REQUIRED, AUDIT_UNAVAILABLE_FOR_MUTATION, Assessment, AssessmentContext,
+        AuditHealth, BASELINE_DENIED, COMMAND_NOT_LITERAL, INTERPRETATION_UNSUPPORTED,
+        POLICY_BUNDLE_INVALID, PROVABLE_OPERATION_KINDS, PolicyActivation, TOOL_UNSUPPORTED,
         TRUSTED_CONFIGURATION_MISSING, assess, outcome_name,
     };
 
@@ -717,26 +736,67 @@ mod tests {
         envelope(command, "c")
     }
 
+    /// The two characters JSON uses for a newline inside a string.
+    ///
+    /// A raw string, so what reaches the fixture is a backslash and an `n`
+    /// rather than an actual newline -- which would make the envelope invalid
+    /// JSON and fail at a layer this test is not about.
+    const JSON_NEWLINE: &str = r"\n";
+
+    /// An `apply_patch` envelope carrying a document built from these lines.
+    fn patch(lines: &[&str]) -> String {
+        let mut document = format!("*** Begin Patch{JSON_NEWLINE}");
+        for line in lines {
+            document.push_str(line);
+            document.push_str(JSON_NEWLINE);
+        }
+        document.push_str("*** End Patch");
+        document.push_str(JSON_NEWLINE);
+        format!(
+            concat!(
+                r#"{{"session_id":"s","transcript_path":null,"cwd":"c","#,
+                r#""hook_event_name":"PreToolUse","model":"m","turn_id":"t","#,
+                r#""permission_mode":"default","tool_name":"apply_patch","tool_use_id":"u","#,
+                r#""tool_input":{{"command":"{}"}}}}"#
+            ),
+            document
+        )
+    }
+
     /// A healthy activation with no supplied policy: restricts nothing, which
     /// is what "no external policy configured" must mean.
     fn healthy_policy() -> PolicyActivation {
         PolicyActivation::none_configured()
     }
 
+    /// Assesses with a healthy audit trail, which is the ordinary case.
+    ///
+    /// Stated as a default rather than inherited from a constant. The gate only
+    /// consults health for a mutation, so this argument is inert for every read
+    /// -- and that is exactly why the value used to be a compile-time
+    /// `Unhealthy` nobody noticed: while the subset was read-only, no test could
+    /// tell the difference.
     fn assess_str(input: &str, configuration: Option<&TrustedConfiguration>) -> Assessment {
-        assess_with(input, configuration, &healthy_policy())
+        assess_with(
+            input,
+            configuration,
+            &healthy_policy(),
+            AuditHealth::Healthy,
+        )
     }
 
     fn assess_with(
         input: &str,
         configuration: Option<&TrustedConfiguration>,
         policy: &PolicyActivation,
+        audit_health: AuditHealth,
     ) -> Assessment {
         assess(
             input.as_bytes(),
             &AssessmentContext {
                 configuration,
                 policy,
+                audit_health,
             },
         )
     }
@@ -810,7 +870,12 @@ mod tests {
         let unhealthy = PolicyActivation::Unhealthy(POLICY_BUNDLE_INVALID);
         let configured = contained();
 
-        let real = assess_with(&bash("git status"), Some(&configured), &unhealthy);
+        let real = assess_with(
+            &bash("git status"),
+            Some(&configured),
+            &unhealthy,
+            AuditHealth::Healthy,
+        );
         assert_eq!(real.outcome, DecisionOutcome::Indeterminate);
         assert_eq!(real.reason, POLICY_BUNDLE_INVALID);
         assert_eq!(real.policy_outcome, "unhealthy");
@@ -834,7 +899,12 @@ mod tests {
             PolicyActivation::Unhealthy(_) => healthy_policy(),
             healthy @ PolicyActivation::Healthy { .. } => healthy,
         };
-        assess_with(input, Some(configuration), &substituted)
+        assess_with(
+            input,
+            Some(configuration),
+            &substituted,
+            AuditHealth::Healthy,
+        )
     }
 
     /// The agent's claim about where its command runs is not read.
@@ -939,6 +1009,8 @@ mod tests {
             Err(error) => unreachable!("test file must be writable: {error}"),
         }
 
+        let mut proven: Vec<&str> = Vec::new();
+
         for command in [
             "git status",
             "git rev-parse --show-toplevel",
@@ -956,6 +1028,118 @@ mod tests {
                 assessment.outcome,
                 DecisionOutcome::Ask,
                 "{command} must settle at ask"
+            );
+            if let Some(kind) = assessment.operation_kind {
+                proven.push(kind);
+            }
+        }
+
+        // The write kinds. Each settles at `ask` too, for a different reason:
+        // a patch reaches an execution surface through what it writes rather
+        // than through what it runs, so no allow row is reachable for it either.
+        let add: &[&str] = &["*** Add File: created.txt", "+x"];
+        let update: &[&str] = &["*** Update File: tracked.txt", "@@", "+x"];
+        let delete: &[&str] = &["*** Delete File: tracked.txt"];
+        let moved: &[&str] = &["*** Update File: tracked.txt", "*** Move to: renamed.txt"];
+
+        for lines in [add, update, delete, moved] {
+            let assessment = assess_str(&patch(lines), Some(&configuration));
+            assert!(assessment.proof_present, "{lines:?} must be provable");
+            assert_eq!(
+                assessment.outcome,
+                DecisionOutcome::Ask,
+                "{lines:?} must settle at ask"
+            );
+            if let Some(kind) = assessment.operation_kind {
+                proven.push(kind);
+            }
+        }
+
+        // The set the pipeline actually proves must be exactly the list
+        // `doctor` reports. This is the join that was missing: `doctor` had its
+        // own hand-written copy, six kinds behind, and nothing compared the two.
+        proven.sort_unstable();
+        proven.dedup();
+        let mut expected = PROVABLE_OPERATION_KINDS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(
+            proven, expected,
+            "the kinds this pipeline proves and the kinds it advertises must match"
+        );
+    }
+
+    /// A mutation with a working audit trail is asked about, not refused.
+    ///
+    /// The gate refuses a mutation when there is no trail to record it. Its
+    /// health used to be a compile-time `Unhealthy` here while `main.rs` opened
+    /// a real sink and computed the real value -- two copies of one fact, and
+    /// the gate read the one that could not be true. Every mutation was refused
+    /// on that line even with `ofw doctor` reporting `audit_health: healthy` and
+    /// records landing on disk.
+    ///
+    /// Both directions are asserted, because only the pair distinguishes a gate
+    /// that reads its input from one that returns a constant: a test for the
+    /// unhealthy case alone passes against the old bug.
+    #[test]
+    fn the_audit_gate_reads_the_health_it_is_given() {
+        let configuration = contained();
+        let tracked = configuration.working_directory().join("tracked.txt");
+        match std::fs::write(&tracked, b"contents") {
+            Ok(()) => {}
+            Err(error) => unreachable!("test file must be writable: {error}"),
+        }
+        let mutation = patch(&["*** Update File: tracked.txt", "@@", "+x"]);
+
+        for (health, outcome, reason) in [
+            (
+                AuditHealth::Healthy,
+                DecisionOutcome::Ask,
+                APPROVAL_REQUIRED,
+            ),
+            // Degraded is not good enough, and that is deliberate: it means a
+            // record may not have landed, and "probably recorded" is not a
+            // basis for changing state. The split is Healthy against the other
+            // three, not Unhealthy against the rest.
+            (
+                AuditHealth::Degraded,
+                DecisionOutcome::Indeterminate,
+                AUDIT_UNAVAILABLE_FOR_MUTATION,
+            ),
+            (
+                AuditHealth::Unhealthy,
+                DecisionOutcome::Indeterminate,
+                AUDIT_UNAVAILABLE_FOR_MUTATION,
+            ),
+            (
+                AuditHealth::Unknown,
+                DecisionOutcome::Indeterminate,
+                AUDIT_UNAVAILABLE_FOR_MUTATION,
+            ),
+        ] {
+            let assessment =
+                assess_with(&mutation, Some(&configuration), &healthy_policy(), health);
+            assert_eq!(assessment.outcome, outcome, "health {health:?}");
+            assert_eq!(assessment.reason, reason, "health {health:?}");
+        }
+
+        // A read is unaffected by any of them, which is why the constant
+        // survived: while the subset was read-only, nothing could tell.
+        for health in [
+            AuditHealth::Healthy,
+            AuditHealth::Degraded,
+            AuditHealth::Unhealthy,
+            AuditHealth::Unknown,
+        ] {
+            let assessment = assess_with(
+                &bash("git status"),
+                Some(&configuration),
+                &healthy_policy(),
+                health,
+            );
+            assert_eq!(
+                assessment.outcome,
+                DecisionOutcome::Ask,
+                "health {health:?}"
             );
         }
     }

@@ -159,6 +159,7 @@ fn run_hook(rest: &[&str]) {
                 &pipeline::AssessmentContext {
                     configuration: configuration.as_ref(),
                     policy: &policy,
+                    audit_health: health,
                 },
             );
             // Record before the process exits. A decision that was made and
@@ -387,6 +388,7 @@ fn run_assess() {
                 &pipeline::AssessmentContext {
                     configuration: configuration.as_ref(),
                     policy: &activation,
+                    audit_health: health,
                 },
             );
             let environment = configuration
@@ -446,14 +448,26 @@ fn run_doctor() {
         .string("protocol_revision", pipeline::protocol_revision())
         .strings("supported_tools", &["Bash", "apply_patch"]);
 
+    // Read from the pipeline rather than written out here. This list was
+    // hand-maintained and had fallen six kinds behind, reporting two
+    // provable operations after eight had shipped -- in the one output an
+    // operator reads to learn what the firewall covers.
+    let provable_kinds: &[&str] = &pipeline::PROVABLE_OPERATION_KINDS;
+
     let mut implemented = json::Object::new();
     implemented
         .string("contracts", "implemented")
         .string("policy_evaluation", "implemented")
         .string("built_in_baseline", "implemented")
         .string("codex_envelope_parsing", "implemented")
-        .string("intent_interpretation", "read_only_git_subset")
-        .string("target_resolution", "repository_scope_only")
+        .string(
+            "intent_interpretation",
+            "git_read_subset_and_apply_patch_documents",
+        )
+        .string(
+            "target_resolution",
+            "repository_scope_path_operands_and_write_targets",
+        )
         .string("policy_bundle_loading", "implemented")
         .string("audit_construction", "implemented")
         .string("audit_persistence", "implemented_without_retention")
@@ -566,12 +580,12 @@ fn run_doctor() {
         .integer(
             "provable_operation_kinds",
             if resolvable && activation.is_healthy() {
-                2
+                provable_kinds.len().try_into().unwrap_or(u64::MAX)
             } else {
                 0
             },
         )
-        .strings("provable_operations", &["git.status", "git.rev_parse"])
+        .strings("provable_operations", provable_kinds)
         .string("enforcement", "not_active")
         // Measured by opening the configured sink, not assumed. Without a
         // configured directory there is no trail, and that is what makes a

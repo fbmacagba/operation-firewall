@@ -474,11 +474,11 @@ fn doctor_reports_what_is_implemented_without_overstating_it() {
     let payload = stdout(&output);
     for expected in [
         "\"enforcement\":\"not_active\"",
-        "\"intent_interpretation\":\"read_only_git_subset\"",
+        "\"intent_interpretation\":\"git_read_subset_and_apply_patch_documents\"",
         "\"audit_construction\":\"implemented\"",
         "\"audit_persistence\":\"implemented_without_retention\"",
         "\"audit_health\":\"unhealthy\"",
-        "\"target_resolution\":\"repository_scope_only\"",
+        "\"target_resolution\":\"repository_scope_path_operands_and_write_targets\"",
         "\"approval_capabilities\":\"not_implemented\"",
         "\"hook_registration\":\"unconfirmed\"",
         // The probes execute the installed command path, so a doctor run is
@@ -503,7 +503,36 @@ fn doctor_reports_provable_operations_only_once_configured() {
     let payload = stdout(&run_with(&["doctor"], b"", &contained()));
     assert!(payload.contains("\"configured\":true"), "got: {payload}");
     assert!(payload.contains("\"paths_resolvable\":true"));
-    assert!(payload.contains("\"provable_operation_kinds\":2"));
+    // Eight, not two. This assertion said two for as long as the subset had
+    // two kinds, and kept saying it through six more -- a pin on the
+    // operator-facing output that pinned the wrong number and made the
+    // staleness harder to see rather than easier.
+    //
+    // It is still written out rather than derived: `ofw-cli` is a binary
+    // crate, so an integration test cannot import its constant. What forces
+    // the agreement is the chain behind it -- `doctor` reads
+    // `PROVABLE_OPERATION_KINDS`, and `every_interpreted_kind_reaches_a_proof`
+    // drives one real operation per entry through the pipeline. This is the
+    // tripwire on the far end of that chain.
+    assert!(
+        payload.contains("\"provable_operation_kinds\":8"),
+        "got: {payload}"
+    );
+    for kind in [
+        "git.status",
+        "git.rev_parse",
+        "git.log",
+        "git.diff",
+        "patch.add_file",
+        "patch.update_file",
+        "patch.delete_file",
+        "patch.move_file",
+    ] {
+        assert!(
+            payload.contains(kind),
+            "doctor omits {kind}, got: {payload}"
+        );
+    }
     // Still not an active protection boundary, and it must not start claiming
     // to be one just because something became provable.
     assert!(payload.contains("\"enforcement\":\"not_active\""));
@@ -664,7 +693,7 @@ fn no_configured_policy_is_healthy_rather_than_unhealthy() {
     let doctor = stdout(&run_with(&["doctor"], b"", &contained()));
     assert!(doctor.contains("\"healthy\":true"), "got: {doctor}");
     assert!(doctor.contains("\"loaded_bundles\":0"));
-    assert!(doctor.contains("\"provable_operation_kinds\":2"));
+    assert!(doctor.contains("\"provable_operation_kinds\":8"));
 }
 
 #[test]

@@ -139,21 +139,50 @@ it would overwrite. Update, delete and move are `ConditionallyRecoverable`,
 because whether the old content returns depends on whether it was committed and
 this crate deliberately does not read `.git`.
 
-Verified against the built binary as well as in tests. What that run *also*
-established is a limit worth stating: `AUDIT_HEALTH` is a compile-time
-`Unhealthy` because the pipeline constructs no sink, so **every mutation this
-build interprets is refused on that line whatever its merits**, and the
-apply-patch outcome cannot yet be exercised end-to-end through the binary. The
-constant's comment previously justified itself with "persistence is not
-implemented", which stopped being true on 2026-08-07; it now says what is
-actually missing, which is wiring that needs an audit directory
-`TrustedConfiguration` does not carry and which must not be defaulted.
+Verified against the built binary as well as in tests, and that run found a
+defect no test could have — plus a claim written into this document that was
+wrong.
 
-Not implemented: retention, audit-sink wiring in the pipeline, revision operands
-(so `git show`, and `git log` against a revision, stay out of the subset), the
-PowerShell subset, and ownership/permission verification of the audit directory
-(per-platform, and the Windows path needs `unsafe`). `ofw doctor` reports each
-of these rather than implying coverage.
+**The audit gate consulted a compile-time constant.** `pipeline.rs` held
+`AUDIT_HEALTH = Unhealthy` while `main.rs` opened the real sink and computed its
+real health. Two copies of one fact, and the gate read the one that could not be
+true: with `OFW_AUDIT_DIRECTORY` configured, `ofw doctor` reported
+`audit_health: healthy` and records were landing in `audit.jsonl`, and every
+mutation was still refused with `AUDIT_UNAVAILABLE_FOR_MUTATION`. Fail-safe in
+direction, which is why nothing caught it — and only reachable at all once the
+apply-patch subset introduced the first non-read effects.
+
+`AssessmentContext` now carries the health, the constant is gone, and both
+entry points supply it. Confirmed against the binary: a create, update or delete
+reports `AUDIT_UNAVAILABLE_FOR_MUTATION` without a configured trail and
+`APPROVAL_REQUIRED` with one, while a read is unaffected either way. **This is
+the first change in this milestone that makes the firewall less restrictive**,
+and it is bounded: `ask` still denies on the wire, so every case remains exit 2.
+Only a *healthy* trail suffices — degraded is refused too, because a record that
+may not have landed is not a basis for changing state.
+
+**A correction to what this document previously said.** An earlier revision of
+this section claimed audit-sink wiring was the missing piece and that
+`TrustedConfiguration` carries no audit directory. Both were wrong. The sink is
+wired through `OFW_AUDIT_DIRECTORY`, has been since persistence landed, and
+`doctor` has been reporting its health all along. What was missing was the gate
+reading it.
+
+**`ofw doctor` was understating the subset by six kinds.** It reported
+`provable_operation_kinds: 2` and `provable_operations: ["git.status",
+"git.rev_parse"]`, and described interpretation as `read_only_git_subset` after
+writes had shipped. That list was hand-maintained in the one output an operator
+reads to learn what the firewall covers. It now derives from
+`pipeline::PROVABLE_OPERATION_KINDS`, and
+`every_interpreted_kind_reaches_a_proof` drives one real operation per entry
+through the pipeline and asserts the set proved is exactly the set advertised —
+the join that was missing.
+
+Not implemented: retention, revision operands (so `git show`, and `git log`
+against a revision, stay out of the subset), the PowerShell subset, and
+ownership/permission verification of the audit directory (per-platform, and the
+Windows path needs `unsafe`). `ofw doctor` reports each of these rather than
+implying coverage.
 
 ### 2 — Unsupported and incomplete operations deny: met
 
@@ -181,7 +210,7 @@ bindings, which would need `unsafe` in this project's own crates.
 
 ### 4 — Test gates: met
 
-Present: **186 tests; 28 retained red-first witnesses**; negative and abuse
+Present: **187 tests; 28 retained red-first witnesses**; negative and abuse
 corpora; canary tests on the CLI streams, bundle errors and audit records;
 property-style monotonicity; deadline handling in the hook.
 
