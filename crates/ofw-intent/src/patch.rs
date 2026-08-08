@@ -98,9 +98,23 @@ pub enum PatchUnsupportedReason {
     NoOperations,
     /// More than [`MAX_PATCH_OPERATIONS`] file operations.
     TooManyOperations,
-    /// A path that is empty, longer than [`MAX_PATCH_PATH_BYTES`], absolute,
-    /// or carrying a drive letter or UNC prefix.
+    /// A path that is empty, longer than [`MAX_PATCH_PATH_BYTES`], carrying a
+    /// doubled or trailing separator, or containing a colon.
     PathUnsupported,
+    /// A path that does not start inside the worktree: a leading separator in
+    /// either dialect, or a Windows drive prefix.
+    ///
+    /// Distinct from [`PathUnsupported`](Self::PathUnsupported) on purpose, and
+    /// the distinction is load-bearing rather than cosmetic. Every absolute form
+    /// is *also* refused by the component checks below — `/etc/passwd` splits to
+    /// an empty first component, `C:/x` splits to a component containing a colon
+    /// — so with one shared reason the absolute-path check is dead code that
+    /// reads as protection. A mutation run found exactly that: four mutants of
+    /// it survived, because removing it changed no outcome any test could see.
+    ///
+    /// Giving it its own reason makes it answerable for itself, and gives an
+    /// operator the accurate answer rather than a true-but-unhelpful one.
+    PathAbsolute,
     /// A path containing a `.` or `..` component.
     ///
     /// Refused in the grammar, unlike a pathspec — see the module note. A
@@ -361,12 +375,12 @@ fn check_path(raw: &str) -> Result<String, PatchUnsupportedReason> {
     if path.is_empty() || path.len() > MAX_PATCH_PATH_BYTES {
         return Err(PatchUnsupportedReason::PathUnsupported);
     }
-    // Absolute in either dialect, plus the two Windows forms that are absolute
+    // Absolute in either dialect, plus the Windows drive form that is absolute
     // without a leading separator. A patch names paths inside the worktree; one
     // that names an absolute path has already left it, and no amount of joining
     // brings it back.
     if path.starts_with('/') || path.starts_with('\\') || has_drive_prefix(path) {
-        return Err(PatchUnsupportedReason::PathUnsupported);
+        return Err(PatchUnsupportedReason::PathAbsolute);
     }
     // Both separators are split on regardless of platform. A `..\..` written on
     // Windows is traversal on Windows, and refusing it only where `\` happens
@@ -390,7 +404,10 @@ fn check_path(raw: &str) -> Result<String, PatchUnsupportedReason> {
     Ok(path.to_owned())
 }
 
-/// Whether the path opens with a Windows drive or UNC prefix.
+/// Whether the path opens with a Windows drive prefix.
+///
+/// UNC is not this function's job: `\\server\share` opens with a separator and
+/// is caught by the check beside this one.
 fn has_drive_prefix(path: &str) -> bool {
     let bytes = path.as_bytes();
     match (bytes.first(), bytes.get(1)) {
@@ -534,7 +551,7 @@ mod tests {
 
     #[test]
     fn every_refusal_reason_is_reachable() {
-        let cases: [(&[&str], PatchUnsupportedReason); 14] = [
+        let cases: [(&[&str], PatchUnsupportedReason); 12] = [
             (
                 &["*** Frobnicate File: a.txt"],
                 PatchUnsupportedReason::DirectiveUnsupported,
@@ -561,14 +578,6 @@ mod tests {
                 PatchUnsupportedReason::DirectiveRepeated,
             ),
             (&["*** Add File: "], PatchUnsupportedReason::PathUnsupported),
-            (
-                &["*** Add File: /etc/passwd"],
-                PatchUnsupportedReason::PathUnsupported,
-            ),
-            (
-                &["*** Add File: C:/windows/system32/x"],
-                PatchUnsupportedReason::PathUnsupported,
-            ),
             (
                 &["*** Add File: a//b.txt"],
                 PatchUnsupportedReason::PathUnsupported,
@@ -638,10 +647,52 @@ mod tests {
             | PatchUnsupportedReason::NoOperations
             | PatchUnsupportedReason::TooManyOperations
             | PatchUnsupportedReason::PathUnsupported
+            | PatchUnsupportedReason::PathAbsolute
             | PatchUnsupportedReason::PathTraversal
             | PatchUnsupportedReason::PathRepeated
             | PatchUnsupportedReason::OperationKindUnrepresentable => {}
         };
+    }
+
+    /// Every absolute form is refused *as absolute*, not incidentally.
+    ///
+    /// Added after a mutation run left four survivors here. Each of these paths
+    /// is also caught by the component checks further down — `/etc/passwd`
+    /// splits to an empty first component, `C:/x` splits to one containing a
+    /// colon — so while both refusals shared a reason, deleting the
+    /// absolute-path check entirely changed nothing any test could observe. It
+    /// read as protection and was dead code.
+    ///
+    /// Asserting the specific reason is what makes it answerable for itself.
+    /// The three forms are asserted separately because they are three separate
+    /// conditions, and an `||` chain is satisfied by any one of them.
+    #[test]
+    fn every_absolute_form_is_refused_as_absolute() {
+        let cases: [&[&str]; 6] = [
+            &["*** Add File: /etc/passwd"],
+            &["*** Add File: \\windows\\system32\\x"],
+            // UNC, which opens with a separator rather than a drive letter.
+            &["*** Add File: \\\\server\\share\\x"],
+            &["*** Add File: C:/windows/system32/x"],
+            // Drive-relative: absolute in the drive sense with no separator at
+            // all, which is the form a leading-separator check alone misses.
+            &["*** Delete File: C:x"],
+            &["*** Update File: ok.txt", "*** Move to: /etc/cron.d/job"],
+        ];
+        for lines in cases {
+            assert_eq!(
+                refused(lines),
+                PatchUnsupportedReason::PathAbsolute,
+                "{lines:?}"
+            );
+        }
+
+        // ...and a relative path that merely *contains* a colon is refused for
+        // its own reason, so the two are not one check wearing two names.
+        assert_eq!(
+            refused(&["*** Add File: notes.txt:stream"]),
+            PatchUnsupportedReason::PathUnsupported
+        );
     }
 
     /// Traversal is refused by *this* grammar, unlike a pathspec, and in both
