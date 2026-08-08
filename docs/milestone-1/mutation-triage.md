@@ -9,6 +9,12 @@ once rather than triaged under pressure to make a build green. This is that
 reading. It exists because completion criterion 4 names mutation testing, and a
 job whose survivors have never been looked at is evidence of nothing.
 
+**Result: 46 of 46 killed**, each verified individually by the procedure below.
+No survivor was accepted, excluded or suppressed — `.cargo/mutants.toml` does
+not exist and no `mutants::skip` attribute was added. The gate now reports
+**164 tests** (measured by running it, not carried over), and the work produced
+one behavioural change, described under "The one real finding".
+
 ## The rule this triage is decided by
 
 The tempting disposition for most of these is "the mutation makes the system
@@ -221,8 +227,13 @@ that family it does not yet deny, and adding it is consistent with this
 project's pattern of giving the gate eyes on the thing rather than trusting a
 review.
 
-**Status:** planned in the same change as the tests. This line is updated once
-the lint is actually enabled and the workspace is clean under it — not before.
+**Status:** done. `indexing_slicing` is denied workspace-wide and the workspace
+is clean under it with no `allow` anywhere. Enabling it found **18 sites across
+seven files** — six in `validate_issued_at`, the rest in tests and in two other
+crates — all rewritten with `get`/`first`/slice-pattern reads.
+`validate_issued_at` now zips its input against a shape constant, so the read
+cannot outrun the input whatever any length check above it does. Behaviour is
+unchanged: same offsets, same floor, same errors.
 
 ## What this list does *not* say
 
