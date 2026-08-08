@@ -297,8 +297,27 @@ jobs:
         # Bounded so the job is a gate rather than a background process:
         # each target gets a fixed time budget and a memory ceiling, and any
         # crash fails the job. Extended campaigns belong on a schedule.
+        #
+        # The target list is read from `cargo fuzz list` rather than written
+        # out here. It used to be written out, and this step's name has been a
+        # lie since the apply-patch target was added minutes before this
+        # change: a fourth untrusted parser existed, had a target, and was
+        # never fuzzed, because the loop still named three.
+        #
+        # That is the same failure this repository has already recorded twice
+        # -- a list kept somewhere the gate cannot see it drifts silently, and
+        # the drift reads as coverage. Deriving it means adding a target is
+        # enough to have it fuzzed, and the count assertion below means an
+        # empty or truncated list fails loudly rather than passing quickly.
         run: |
-          for target in envelope bundle command; do
+          targets=$(cargo +nightly fuzz list --fuzz-dir fuzz)
+          echo "targets: $targets"
+          count=$(echo "$targets" | grep -c .)
+          if [ "$count" -lt 4 ]; then
+            echo "::error::expected at least 4 fuzz targets, found $count"
+            exit 1
+          fi
+          for target in $targets; do
             echo "::group::fuzz $target"
             cargo +nightly fuzz run "$target" \
               --fuzz-dir fuzz \
