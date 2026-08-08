@@ -15,6 +15,16 @@ not exist and no `mutants::skip` attribute was added. The gate now reports
 **164 tests** (measured by running it, not carried over), and the work produced
 one behavioural change, described under "The one real finding".
 
+**What that result is measured against.** The mutations came from the artifact
+generated at `6db09a0` and were applied to that source. `validate_issued_at`
+has since been rewritten — see "The one real finding" — so four of the forty-six
+no longer exist as written, and their diffs no longer apply to this tree. Their
+kills were real when made; what supersedes them is code with a different shape,
+which CI re-measures from scratch. The floor's replacement carries its own
+boundary test at the one length that distinguishes it, added for exactly that
+reason. Treat a CI mutation report on the current head, not this table, as the
+live count.
+
 ## The rule this triage is decided by
 
 The tempting disposition for most of these is "the mutation makes the system

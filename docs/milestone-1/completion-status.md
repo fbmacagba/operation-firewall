@@ -203,8 +203,8 @@ no defect.
 **Mutation testing** runs as of 2026-08-07, as a CI-only job so nothing is
 installed on an operator's machine. It is **advisory** (`continue-on-error`)
 and criterion 4 therefore stays partial: a gate that cannot fail is not yet a
-gate. It should be flipped to blocking once the survivor list has been triaged
-once, and that has not happened.
+gate. The triage that was the precondition for flipping it has now happened —
+see below.
 
 It justified itself on its first run. 220 mutants: 132 caught, **50 missed** —
 and the job reported *success*, because success on a `continue-on-error` job
@@ -222,11 +222,41 @@ verdict found two survivors that were real:
   longer passes. The boundary was untested.
 
 Both are killed, verified by applying each mutation by hand. The score moved to
-**136 caught / 46 missed**. The remaining 46 are believed to be fail-safe
-(`>` becoming `>=` makes a bound stricter) or unobservable (a `Display::fmt`
-returning `Ok(())`), but **believed is the operative word** — they have not been
-triaged one by one, and that triage is what stands between this criterion and
-"met".
+**136 caught / 46 missed**.
+
+**All 46 were triaged and killed on 2026-08-08** — see
+[the triage](mutation-triage.md) for the per-mutant table. The earlier reading
+of them, that they were "believed to be fail-safe or unobservable", was wrong in
+the way that matters: *believed* was doing the work in that sentence, and the
+belief was mostly true and entirely untested. Direction of effect turned out to
+set severity, not to excuse a survivor — this project's own source already says
+so, in `bundle.rs`: silently changing what a rule means is a defect even when
+the change is safe.
+
+What the triage found:
+
+- **Nine survivors said one thing.** Nothing asserted that a rule scoped by
+  `target_kinds`, `environments`, `reversibility` or `blast_radius` *fails* to
+  match facts outside its scope. Those dimensions were built and composed in
+  tests, but no result depended on them working. Eight only ever add denies; the
+  ninth would stop a rule applying to the target kind it names.
+- **Six were bounds that stop bounding.** `>` becoming `==` refuses only
+  `MAX + 1` and passes everything larger, and a single over-limit test lands on
+  the one value that mutation still rejects. Every bound in the four decision
+  crates is now pinned from below and from far above.
+- **`validate_issued_at` had five of six branches unconstrained**, because every
+  existing fixture was wrong in several ways at once and no single check had to
+  work.
+- **One was not a missing test.** That one is under criterion 3's neighbourhood
+  as much as this one: it named unchecked indexing behind a distant length
+  guard, and a panic in this binary is exit 101, which the Codex host treats as
+  fail-open. `clippy::indexing_slicing` is now denied workspace-wide; enabling
+  it found 18 sites across seven files, all rewritten, no `allow` anywhere.
+
+**The criterion stays partial**, for one reason only: the job is still
+`continue-on-error`, and a gate that cannot fail is not yet a gate. Flipping it
+requires a clean mutation run on a head that contains all of the above, which is
+a CI cycle away rather than a judgement away.
 
 Every guard added in this milestone was verified load-bearing by weakening it
 alone and confirming the matching test reds — not merely by the suite passing.
