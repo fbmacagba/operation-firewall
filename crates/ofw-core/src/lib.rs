@@ -317,8 +317,13 @@ pub fn evidence_from_intent(
 ) -> OperationEvidence {
     let execution_surface = match candidate.execution_surface_risk() {
         // The risk enum has no "none" variant by design; this match is the
-        // guard that keeps it that way if one is ever added.
-        ofw_intent::ExecutionSurfaceRisk::RepositoryConfigControlled => ExecutionSurface::Present,
+        // guard that keeps it that way if one is ever added. Both arms are
+        // written out rather than collapsed to `_`, because a variant added
+        // later must not inherit `Present` silently -- if it is genuinely
+        // inert, that is the system's first reachable allow row and it deserves
+        // to be a compile error until someone says so on purpose.
+        ofw_intent::ExecutionSurfaceRisk::RepositoryConfigControlled
+        | ofw_intent::ExecutionSurfaceRisk::WrittenPathMayBeExecuted => ExecutionSurface::Present,
     };
     // Read from the grammar rather than written as literals here. Both were
     // hardcoded until 2026-08-07, which was correct only for as long as the

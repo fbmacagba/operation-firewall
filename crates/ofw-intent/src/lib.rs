@@ -20,6 +20,13 @@
 //! formats carrying directives -- so a denylist would read as coverage while
 //! silently admitting the next one. Anything not named is unsupported.
 
+mod patch;
+
+pub use patch::{
+    MAX_PATCH_BYTES, MAX_PATCH_LINES, MAX_PATCH_OPERATIONS, MAX_PATCH_PATH_BYTES,
+    PatchClassification, PatchUnsupportedReason, document_digest, interpret_patch,
+};
+
 use ofw_contracts::{NamespacedName, OperationEffect};
 
 /// The revision of the closed grammar this crate implements.
@@ -179,17 +186,39 @@ fn push_token(
 
 /// How much of an execution surface the operation carries.
 ///
-/// There is deliberately no `None` variant reachable from this crate. Every
-/// git invocation reads repository-controlled configuration, and
-/// `core.fsmonitor`, `core.pager`, `diff.*.textconv` and external diff drivers
-/// all name programs git will execute -- set in `.git/config` by a malicious
-/// repository with no command-line flag involved. No git command can be proven
-/// non-executing from its argv alone.
+/// There is deliberately no `None` variant. Every variant here means "an
+/// execution surface is reachable", and `ofw-core` maps all of them to
+/// [`ExecutionSurface::Present`](ofw_core::ExecutionSurface), which no allow row
+/// survives. The enum exists to say *which* surface, because the two known ones
+/// arrive by different routes and a future variant might not be reachable at
+/// all — and that judgement should be made by whoever adds it, against a named
+/// alternative, rather than inherited from a single-variant type.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExecutionSurfaceRisk {
     /// The invoked program consults repository-controlled configuration that
     /// can name further programs to execute.
+    ///
+    /// Every git invocation does. `core.fsmonitor`, `core.pager`,
+    /// `diff.*.textconv` and external diff drivers all name programs git will
+    /// run, set in `.git/config` by the repository with no command-line flag
+    /// involved. No git command can be proven non-executing from its argv alone.
     RepositoryConfigControlled,
+    /// The operation writes a path that something else may later execute.
+    ///
+    /// Applying a patch runs no program: the host writes bytes to a file and
+    /// stops. The surface is in what those bytes become. A file written to
+    /// `.git/hooks/pre-commit` runs on the next commit; `.vscode/tasks.json`
+    /// with `runOn: folderOpen` runs with no invocation at all; a `foo.py`
+    /// dropped at a repository root shadows an installed `foo` package for
+    /// every `python -m foo` launched from there, and the shadow *runs* as a
+    /// side effect of the failed import before it errors.
+    ///
+    /// Deciding which written paths are inert would mean enumerating every
+    /// convention any tool on the machine uses to find code, which is open-ended
+    /// in exactly the way the flag allowlist exists to avoid being. So this is
+    /// not "a patch executes something" — it is "no path can be proven inert
+    /// here", which is the same shape of claim, and refused the same way.
+    WrittenPathMayBeExecuted,
 }
 
 /// Whether the operation needs privilege beyond the invoking user's own, or
